@@ -39,6 +39,9 @@ def create_tenant(
     set_tenant_context(session, tenant.id)
     ensure_development_user(session, user_id)
     session.add(tenant)
+    # The membership references both parent rows. Flush them first so PostgreSQL
+    # never attempts the membership INSERT before its tenant and user exist.
+    session.flush()
     session.add(Membership(tenant_id=tenant.id, user_id=user_id, role="enterprise_admin"))
     session.commit()
     set_tenant_context(session, tenant.id)

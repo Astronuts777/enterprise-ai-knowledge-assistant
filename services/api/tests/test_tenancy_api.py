@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from enterprise_ai_api.main import create_app
 
@@ -21,6 +22,21 @@ def create_tenant(test_client: TestClient, user_id: UUID, name: str) -> dict[str
     response = test_client.post("/v1/tenants", json={"name": name}, headers=headers(user_id))
     assert response.status_code == 201
     return response.json()
+
+
+def test_create_tenant_respects_parent_foreign_keys() -> None:
+    with client() as test_client:
+        with test_client.app.state.engine.connect() as connection:
+            foreign_keys_enabled = connection.scalar(text("PRAGMA foreign_keys"))
+        tenant = create_tenant(test_client, ADMIN_A, "Foreign key regression")
+        members = test_client.get(
+            f"/v1/tenants/{tenant['id']}/members",
+            headers=headers(ADMIN_A),
+        )
+
+    assert foreign_keys_enabled == 1
+    assert members.status_code == 200
+    assert members.json()[0]["tenant_id"] == tenant["id"]
 
 
 def test_admin_can_create_and_list_knowledge_spaces() -> None:

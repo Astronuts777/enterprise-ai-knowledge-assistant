@@ -147,6 +147,7 @@ def _add_version(
         created_by=user_id,
     )
     session.add(version)
+    session.flush()
     for position, chunk in enumerate(parsed_chunks, start=1):
         session.add(
             DocumentChunk(

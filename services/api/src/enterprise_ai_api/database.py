@@ -8,7 +8,7 @@ from uuid import UUID
 from alembic import command
 from alembic.config import Config
 from fastapi import Request
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -55,14 +55,23 @@ def prepare_database(database_url: str) -> None:
 
 def create_database_engine(database_url: str) -> Engine:
     if database_url == "sqlite://":
-        return create_engine(
+        engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-    if database_url.startswith("sqlite"):
-        return create_engine(database_url, connect_args={"check_same_thread": False})
-    return create_engine(database_url, pool_pre_ping=True)
+    elif database_url.startswith("sqlite"):
+        engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    else:
+        return create_engine(database_url, pool_pre_ping=True)
+
+    @event.listens_for(engine, "connect")
+    def enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return engine
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
