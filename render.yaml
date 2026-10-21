@@ -36,6 +36,14 @@ services:
       # OBJECT_STORAGE_* secrets in Render before accepting real enterprise files.
       - key: OBJECT_STORAGE_BACKEND
         value: local
+      # The public demo stays in private/local evidence mode. Configure provider
+      # models and OPENAI_API_KEY as Render Secrets only after a data review.
+      - key: AI_PROVIDER
+        value: local
+      - key: EMBEDDING_PROVIDER
+        value: disabled
+      - key: AI_ALLOW_RESTRICTED
+        value: "false"
 
 databases:
   - name: enterprise-ai-knowledge-db

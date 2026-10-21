@@ -21,9 +21,10 @@
 6. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
 7. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
 8. 只针对当前用户获准访问的已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
-9. 在资料不足时明确拒答，不用没有来源的内容补全答案。
-10. 保存当前用户自己的问答历史，并阻止跨企业、跨空间读取数据。
-11. 由企业管理员查看身份、权限、文档和问答操作的追加式审计日志。
+9. 可选启用语义向量混合检索和外部生成模型；模型引用会由服务端校验并重新编号。
+10. 在资料不足时明确拒答，不用没有来源的内容补全答案。
+11. 保存当前用户自己的问答历史，并阻止跨企业、跨空间读取数据。
+12. 由企业管理员查看身份、权限、文档和问答操作的追加式审计日志。
 
 适合用来验证以下场景：
 
@@ -35,12 +36,13 @@
 
 ### 当前能力边界
 
-- 问答使用透明、可重复的本地关键词检索和原文摘录，尚未调用外部大模型。
+- 默认问答使用透明、可重复的本地关键词检索和原文摘录，不向外部模型发送资料；管理员可选配置语义嵌入和生成模型。
 - 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
 - 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
 - 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
 - 登录按账号和网络来源进行数据库级限流；多因素认证、企业 SSO、设备管理和异常检测尚未接入。
-- SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和审计导出仍在路线图中。
+- 当前语义检索在授权后的加密向量候选集中由应用计算，适合现阶段规模；数据库内 pgvector 检索仍在路线图中。
+- SCIM、OCR、云盘连接器、决策证据包、审批和审计导出仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
@@ -61,8 +63,9 @@ flowchart LR
     A --> P[身份与权限检查]
     P --> D[(SQLite 或 PostgreSQL)]
     A --> F[文件存储]
-    A --> R[权限感知检索]
+    A --> R[权限感知混合检索]
     R --> D
+    R -. 可选 .-> M[模型适配器]
     R --> C[回答与不可变引用]
     K[Worker 边界] -. 后续异步解析 .-> A
 ```
@@ -251,6 +254,7 @@ git push -u origin codex/feature-name
 - 密码使用带随机盐的 scrypt 单向哈希，数据库中没有可还原的明文密码。
 - 邮箱使用 AES-256-GCM 加密保存，另用带密钥 HMAC 摘要完成精确账号查询。
 - 文档解析正文、问题、回答和引用摘录在进入数据库前使用 AES-256-GCM 认证加密。
+- 语义嵌入向量在进入数据库前同样使用 AES-256-GCM 认证加密，数据库不会保存可直接读取的向量。
 - 上传原件只在内存中完成首轮解析，落盘前加密为 `payload.enc`，不保留明文原件。
 - 文件重复检测使用带密钥内容摘要，避免公开 SHA-256 暴露已知文件是否存在。
 - 数据库中的 UUID、角色、状态和时间等索引元数据保持明文，以支持授权、关联和运维查询。
@@ -338,6 +342,15 @@ S3 兼容服务，而不改变业务数据模型。
 | `OBJECT_STORAGE_PREFIX` | 同一存储桶内的环境隔离前缀 | 无 |
 | `OBJECT_STORAGE_FORCE_PATH_STYLE` | MinIO 等服务是否强制 path-style URL | `false` |
 | `OBJECT_STORAGE_SSE` | 可选服务端加密算法，例如 AWS 的 `AES256` | 无 |
+| `AI_PROVIDER` | 回答生成：`local` 或 `openai` | `local` |
+| `EMBEDDING_PROVIDER` | 语义嵌入：`disabled` 或 `openai` | `disabled` |
+| `AI_MODEL` | 外部回答模型名称；启用 `openai` 回答时必填 | 无 |
+| `EMBEDDING_MODEL` | 外部嵌入模型名称；启用 `openai` 嵌入时必填 | 无 |
+| `EMBEDDING_DIMENSIONS` | 可选嵌入维度，范围 1–4096 | 由模型决定 |
+| `OPENAI_API_KEY` | OpenAI API 密钥，只能保存于 Secret 管理器 | 无 |
+| `OPENAI_BASE_URL` / `OPENAI_PROJECT` | OpenAI API 根地址和可选 Project | 官方 API / 无 |
+| `AI_REQUEST_TIMEOUT_SECONDS` | 外部模型请求超时，范围 1–120 秒 | `30` |
+| `AI_ALLOW_RESTRICTED` | 是否允许严格受限空间调用外部模型 | `false` |
 | `BACKUP_ENCRYPTION_KEY` | 独立的 32 字节 Base64 数据库备份密钥 | 无；执行备份时必须设置 |
 | `BACKUP_STORAGE_BACKEND` | 备份后端：`local` 或 `s3`；生产只允许 `s3` | `local` |
 | `BACKUP_STORAGE_*` | 独立备份桶的 endpoint、凭据、bucket、region、prefix、SSE | 无 |
@@ -382,6 +395,7 @@ GET  /v1/tenants/{tenant_id}/documents/{document_id}
 POST /v1/tenants/{tenant_id}/documents/{document_id}/versions
 GET  /v1/tenants/{tenant_id}/document-versions/{version_id}/chunks
 POST /v1/tenants/{tenant_id}/document-versions/{version_id}/publish
+POST /v1/tenants/{tenant_id}/document-versions/{version_id}/semantic-index
 POST /v1/tenants/{tenant_id}/questions
 GET  /v1/tenants/{tenant_id}/questions
 GET  /healthz
@@ -469,6 +483,20 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 
 这是证据完整性设计。`ready` 只表示解析完成，只有知识管理员明确发布的版本才能进入默认检索。
 
+### 如何启用语义检索和外部生成模型
+
+默认配置是 `AI_PROVIDER=local`、`EMBEDDING_PROVIDER=disabled`。完成数据出境、供应商保留策略和
+密钥管理评审后，可在部署平台的 Secret 管理器设置 `OPENAI_API_KEY`、`AI_MODEL` 和
+`EMBEDDING_MODEL`，再把两个 provider 分别改为 `openai`。启用后，新上传文档会建立加密语义索引；
+已有版本可由知识管理员调用 `semantic-index` 接口补建。`restricted` 空间默认始终使用本地回答，
+除非企业明确设置 `AI_ALLOW_RESTRICTED=true`。
+
+外部生成只接收本次用户有权访问、已经发布并被检索选中的证据片段，请求明确使用 `store=false`；
+模型必须按严格 JSON Schema 返回主张与引用编号，服务端会拒绝越界引用并重新生成显示编号。详细威胁
+边界和扩展方案见[混合检索与可配置 AI](docs/08-hybrid-retrieval-and-ai.md)。实现依据 OpenAI 官方的
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
+和 [Embeddings API](https://developers.openai.com/api/reference/python/resources/embeddings/methods/create)。
+
 ## 路线图
 
 - [x] 企业、成员、角色和知识空间
@@ -482,8 +510,9 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [x] 企业管理员审计日志、拒绝事件记录与 PostgreSQL 追加式保护
 - [x] 独立密钥加密的 PostgreSQL 备份与隔离恢复演练工具
 - [x] 数据库就绪检查、请求 ID、结构化访问日志与生产配置审计
-- [ ] pgvector 关键词与语义混合检索
-- [ ] 可配置的大模型生成与引用校验
+- [x] 授权后加密向量与关键词混合检索（当前规模）
+- [x] 可配置的大模型生成、严格结构化输出与引用校验
+- [ ] PostgreSQL pgvector 规模化检索与租户过滤召回评测
 - [ ] 决策证据包、人工审批和审计导出
 - [ ] 异步 Worker、OCR 和批量导入
 - [ ] 企业 SSO、SCIM 与外部知识连接器
@@ -502,3 +531,4 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [安全、身份与加密设计](docs/05-security-and-access-control.md)
 - [备份、恢复演练与数据保留](docs/06-backup-and-recovery.md)
 - [生产运行、监控与配置审计](docs/07-production-operations.md)
+- [混合检索与可配置 AI](docs/08-hybrid-retrieval-and-ai.md)

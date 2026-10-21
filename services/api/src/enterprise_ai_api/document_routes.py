@@ -1,5 +1,7 @@
 """Permission-aware document upload, version, preview, and publication endpoints."""
 
+import json
+import logging
 import mimetypes
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -11,6 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.ai_providers import AIProviderError, EmbeddingProvider
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import content_fingerprint, encrypt_bytes
 from enterprise_ai_api.database import get_session, set_tenant_context
@@ -21,7 +24,7 @@ from enterprise_ai_api.document_processing import (
     safe_filename,
     validate_extension,
 )
-from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion
+from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
 from enterprise_ai_api.object_storage import ObjectStorage, ObjectStorageError
 from enterprise_ai_api.schemas import (
     DocumentChunkResponse,
@@ -38,6 +41,7 @@ from enterprise_ai_api.tenancy import (
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
+logger = logging.getLogger(__name__)
 DatabaseSession = Annotated[Session, Depends(get_session)]
 UploadedFile = Annotated[UploadFile, File(description="PDF, DOCX, TXT, or Markdown; max 10 MiB")]
 DocumentTitle = Annotated[str | None, Form(max_length=255)]
@@ -48,6 +52,13 @@ def get_object_storage(request: Request) -> ObjectStorage:
 
 
 Storage = Annotated[ObjectStorage, Depends(get_object_storage)]
+
+
+def get_embedding_provider(request: Request) -> EmbeddingProvider:
+    return request.app.state.embedding_provider
+
+
+Embedding = Annotated[EmbeddingProvider, Depends(get_embedding_provider)]
 
 
 def _document_or_404(
@@ -132,6 +143,8 @@ def _add_version(
     media_type: str | None,
     content: bytes,
     audit_action: str,
+    embedding_provider: EmbeddingProvider,
+    allow_external_ai: bool,
 ) -> DocumentVersion:
     content_hash = content_fingerprint(content)
     duplicate = session.scalar(
@@ -175,6 +188,31 @@ def _add_version(
         version_status = "failed"
         error_message = str(error)
 
+    embeddings: list[list[float]] | None = None
+    embedding_status = "disabled"
+    if parsed_chunks and embedding_provider.enabled:
+        if embedding_provider.external and not allow_external_ai:
+            embedding_status = "blocked_by_classification"
+        else:
+            try:
+                embeddings = []
+                for start in range(0, len(parsed_chunks), 64):
+                    batch = parsed_chunks[start : start + 64]
+                    embeddings.extend(
+                        embedding_provider.embed([chunk.text for chunk in batch])
+                    )
+                if len(embeddings) != len(parsed_chunks):
+                    raise AIProviderError("Embedding provider returned incomplete results")
+                embedding_status = "indexed"
+            except AIProviderError:
+                logger.warning(
+                    "Semantic indexing failed for document version %s",
+                    version_id,
+                    exc_info=True,
+                )
+                embeddings = None
+                embedding_status = "unavailable"
+
     version = DocumentVersion(
         id=version_id,
         tenant_id=tenant_id,
@@ -192,6 +230,7 @@ def _add_version(
     session.add(version)
     session.flush()
     for position, chunk in enumerate(parsed_chunks, start=1):
+        vector = embeddings[position - 1] if embeddings is not None else None
         session.add(
             DocumentChunk(
                 tenant_id=tenant_id,
@@ -199,6 +238,10 @@ def _add_version(
                 position=position,
                 locator=chunk.locator,
                 text=chunk.text,
+                embedding=(
+                    json.dumps(vector, separators=(",", ":")) if vector is not None else None
+                ),
+                embedding_model=(embedding_provider.model_name if vector is not None else None),
             )
         )
 
@@ -215,6 +258,8 @@ def _add_version(
             "version_number": version_number,
             "byte_size": len(content),
             "status": version_status,
+            "embedding_status": embedding_status,
+            "embedding_provider": embedding_provider.name,
         },
     )
 
@@ -241,6 +286,8 @@ async def upload_document(
     user_id: CurrentUserId,
     session: DatabaseSession,
     object_storage: Storage,
+    embedding_provider: Embedding,
+    request: Request,
     file: UploadedFile,
     title: DocumentTitle = None,
 ) -> DocumentUploadResponse:
@@ -273,6 +320,14 @@ async def upload_document(
     )
     session.add(document)
     session.flush()
+    space = session.get(Space, space_id)
+    allow_external_ai = bool(
+        space is not None
+        and (
+            space.classification != "restricted"
+            or request.app.state.external_ai_allowed_for_restricted
+        )
+    )
     version = _add_version(
         session,
         object_storage=object_storage,
@@ -284,6 +339,8 @@ async def upload_document(
         media_type=file.content_type,
         content=content,
         audit_action="document.created",
+        embedding_provider=embedding_provider,
+        allow_external_ai=allow_external_ai,
     )
     return DocumentUploadResponse(document=document, version=version)
 
@@ -299,6 +356,8 @@ async def upload_document_version(
     user_id: CurrentUserId,
     session: DatabaseSession,
     object_storage: Storage,
+    embedding_provider: Embedding,
+    request: Request,
     file: UploadedFile,
 ) -> DocumentVersion:
     authorize_tenant_action(
@@ -311,6 +370,14 @@ async def upload_document_version(
         session, tenant_id, user_id, document_id, manage=True
     )
     filename, extension, content = await _read_upload(file)
+    space = session.get(Space, document.space_id)
+    allow_external_ai = bool(
+        space is not None
+        and (
+            space.classification != "restricted"
+            or request.app.state.external_ai_allowed_for_restricted
+        )
+    )
     return _add_version(
         session,
         object_storage=object_storage,
@@ -322,6 +389,8 @@ async def upload_document_version(
         media_type=file.content_type,
         content=content,
         audit_action="document.version_uploaded",
+        embedding_provider=embedding_provider,
+        allow_external_ai=allow_external_ai,
     )
 
 
@@ -466,6 +535,107 @@ def publish_document_version(
         details={
             "document_id": str(version.document_id),
             "version_number": version.version_number,
+        },
+    )
+    session.commit()
+    set_tenant_context(session, tenant_id)
+    session.refresh(version)
+    return version
+
+
+@router.post(
+    "/tenants/{tenant_id}/document-versions/{version_id}/semantic-index",
+    response_model=DocumentVersionResponse,
+)
+def rebuild_document_semantic_index(
+    tenant_id: UUID,
+    version_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+    embedding_provider: Embedding,
+    request: Request,
+) -> DocumentVersion:
+    """Create or replace encrypted embeddings for an existing document version."""
+
+    authorize_tenant_action(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.MANAGE_DOCUMENTS,
+    )
+    version = _version_or_404(
+        session, tenant_id, user_id, version_id, manage=True
+    )
+    if not embedding_provider.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Semantic indexing is not configured",
+        )
+    document = session.get(Document, version.document_id)
+    space = session.get(Space, document.space_id) if document is not None else None
+    if (
+        embedding_provider.external
+        and space is not None
+        and space.classification == "restricted"
+        and not request.app.state.external_ai_allowed_for_restricted
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="External semantic indexing is blocked for restricted spaces",
+        )
+    chunks = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_version_id == version_id)
+            .order_by(DocumentChunk.position)
+        )
+    )
+    if not chunks:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This document version has no parsed content",
+        )
+    try:
+        embeddings: list[list[float]] = []
+        for start in range(0, len(chunks), 64):
+            batch = chunks[start : start + 64]
+            embeddings.extend(embedding_provider.embed([chunk.text for chunk in batch]))
+        if len(embeddings) != len(chunks):
+            raise AIProviderError("Embedding provider returned incomplete results")
+    except AIProviderError as error:
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="document.semantic_index_failed",
+            resource_type="document_version",
+            resource_id=version.id,
+            outcome="failure",
+            details={
+                "provider": embedding_provider.name,
+                "model": embedding_provider.model_name,
+            },
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Semantic indexing is temporarily unavailable",
+        ) from error
+
+    for chunk, vector in zip(chunks, embeddings, strict=True):
+        chunk.embedding = json.dumps(vector, separators=(",", ":"))
+        chunk.embedding_model = embedding_provider.model_name
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="document.semantic_indexed",
+        resource_type="document_version",
+        resource_id=version.id,
+        details={
+            "chunk_count": len(chunks),
+            "provider": embedding_provider.name,
+            "model": embedding_provider.model_name,
         },
     )
     session.commit()

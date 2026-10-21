@@ -107,6 +107,8 @@ export type KnowledgeAnswer = {
   question: string;
   answer: string;
   status: AnswerStatus;
+  generator: "local" | "openai";
+  model_name: string | null;
   citations: AnswerCitation[];
   created_at: string;
 };

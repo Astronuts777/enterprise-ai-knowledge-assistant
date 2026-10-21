@@ -15,6 +15,14 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from enterprise_ai_api.ai_providers import (
+    EmbeddingProvider,
+    EvidenceAnswerProvider,
+    LocalEvidenceAnswerProvider,
+    answer_provider_from_environment,
+    embedding_provider_from_environment,
+    external_ai_allowed_for_restricted_spaces,
+)
 from enterprise_ai_api.audit_routes import router as audit_router
 from enterprise_ai_api.auth_routes import router as auth_router
 from enterprise_ai_api.crypto import require_production_key
@@ -82,6 +90,8 @@ def create_app(
     public_demo: bool | None = None,
     account_auth: bool | None = None,
     session_secret: str | None = None,
+    answer_provider: EvidenceAnswerProvider | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> FastAPI:
     application = FastAPI(
         title="Enterprise AI Knowledge Assistant API",
@@ -107,6 +117,14 @@ def create_app(
     application.state.session_secret = session_secret or os.getenv("SESSION_SECRET", "")
     application.state.public_url = os.getenv("APP_PUBLIC_URL", "http://localhost:3000").rstrip("/")
     application.state.email_sender = email_sender or email_sender_from_environment()
+    application.state.answer_provider = answer_provider or answer_provider_from_environment()
+    application.state.local_answer_provider = LocalEvidenceAnswerProvider()
+    application.state.embedding_provider = (
+        embedding_provider or embedding_provider_from_environment()
+    )
+    application.state.external_ai_allowed_for_restricted = (
+        external_ai_allowed_for_restricted_spaces()
+    )
     application.state.require_email_verification = (
         os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() in {"1", "true", "yes"}
         if require_email_verification is None

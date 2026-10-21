@@ -218,5 +218,7 @@ class KnowledgeAnswerResponse(BaseModel):
     question: str
     answer: str
     status: Literal["grounded", "insufficient_evidence"]
+    generator: Literal["local", "openai"]
+    model_name: str | None
     citations: list[AnswerCitationResponse]
     created_at: datetime

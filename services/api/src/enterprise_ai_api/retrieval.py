@@ -1,5 +1,7 @@
-"""Deterministic local retrieval for the first evidence-grounded answer slice."""
+"""Permission-scoped hybrid lexical and encrypted-vector retrieval."""
 
+import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -8,7 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion
+from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
 
 MAX_CANDIDATE_CHUNKS = 5000
 MAX_CITATIONS = 4
@@ -58,6 +60,9 @@ class RetrievedEvidence:
     document: Document
     score: float
     excerpt: str
+    lexical_score: float
+    semantic_score: float | None
+    classification: str
 
 
 def search_published_knowledge(
@@ -66,17 +71,20 @@ def search_published_knowledge(
     tenant_id: UUID,
     question: str,
     space_ids: list[UUID] | None = None,
+    query_embedding: list[float] | None = None,
+    embedding_model: str | None = None,
 ) -> list[RetrievedEvidence]:
-    """Rank published chunks using transparent local lexical matching."""
+    """Rank published chunks using lexical coverage and optional cosine similarity."""
 
     query_tokens = _tokens(question)
-    if not query_tokens:
+    if not query_tokens and query_embedding is None:
         return []
 
     statement = (
-        select(DocumentChunk, DocumentVersion, Document)
+        select(DocumentChunk, DocumentVersion, Document, Space)
         .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
         .join(Document, Document.id == DocumentVersion.document_id)
+        .join(Space, Space.id == Document.space_id)
         .where(
             DocumentChunk.tenant_id == tenant_id,
             DocumentVersion.status == "published",
@@ -90,9 +98,16 @@ def search_published_knowledge(
 
     normalized_question = _normalize(question)
     ranked: list[RetrievedEvidence] = []
-    for chunk, version, document in session.execute(statement):
-        score = _score(normalized_question, query_tokens, chunk.text)
-        if score <= 0:
+    for chunk, version, document, space in session.execute(statement):
+        lexical_score = _score(normalized_question, query_tokens, chunk.text)
+        semantic_score = _semantic_score(
+            query_embedding,
+            chunk.embedding,
+            query_model=embedding_model,
+            chunk_model=chunk.embedding_model,
+        )
+        score = _hybrid_score(lexical_score, semantic_score)
+        if score is None:
             continue
         ranked.append(
             RetrievedEvidence(
@@ -101,6 +116,9 @@ def search_published_knowledge(
                 document=document,
                 score=score,
                 excerpt=_best_excerpt(chunk.text, query_tokens),
+                lexical_score=lexical_score,
+                semantic_score=semantic_score,
+                classification=space.classification,
             )
         )
 
@@ -139,6 +157,8 @@ def _tokens(value: str) -> set[str]:
 
 
 def _score(normalized_question: str, query_tokens: set[str], text: str) -> float:
+    if not query_tokens:
+        return 0
     normalized_text = _normalize(text)
     text_tokens = _tokens(normalized_text)
     shared = query_tokens & text_tokens
@@ -154,6 +174,53 @@ def _score(normalized_question: str, query_tokens: set[str], text: str) -> float
         8 if len(normalized_question) >= 4 and normalized_question in normalized_text else 0
     )
     return round((coverage * 10) + frequency + phrase_bonus, 4)
+
+
+def _semantic_score(
+    query_embedding: list[float] | None,
+    stored_embedding: str | None,
+    *,
+    query_model: str | None,
+    chunk_model: str | None,
+) -> float | None:
+    if (
+        query_embedding is None
+        or stored_embedding is None
+        or query_model is None
+        or query_model != chunk_model
+    ):
+        return None
+    try:
+        raw_vector = json.loads(stored_embedding)
+        chunk_embedding = [float(value) for value in raw_vector]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if len(query_embedding) != len(chunk_embedding) or not chunk_embedding:
+        return None
+    dot_product = sum(
+        left * right
+        for left, right in zip(query_embedding, chunk_embedding, strict=True)
+    )
+    query_norm = math.sqrt(sum(value * value for value in query_embedding))
+    chunk_norm = math.sqrt(sum(value * value for value in chunk_embedding))
+    if query_norm == 0 or chunk_norm == 0:
+        return None
+    similarity = dot_product / (query_norm * chunk_norm)
+    if not math.isfinite(similarity):
+        return None
+    return max(-1.0, min(1.0, similarity))
+
+
+def _hybrid_score(lexical_score: float, semantic_score: float | None) -> float | None:
+    lexical_normalized = min(lexical_score / 20, 1.0)
+    if semantic_score is None:
+        return round(lexical_normalized, 6) if lexical_score > 0 else None
+    semantic_normalized = max(0.0, semantic_score)
+    if lexical_score <= 0 and semantic_normalized < 0.35:
+        return None
+    if lexical_score <= 0:
+        return round(semantic_normalized * 0.85, 6)
+    return round((lexical_normalized * 0.55) + (semantic_normalized * 0.45), 6)
 
 
 def _best_excerpt(text: str, query_tokens: set[str]) -> str:

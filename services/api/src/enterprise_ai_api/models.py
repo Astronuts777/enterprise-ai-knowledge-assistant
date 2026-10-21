@@ -191,9 +191,9 @@ class SpaceMembership(Base):
     tenant_id: Mapped[UUID] = mapped_column(
         ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
-    space_id: Mapped[UUID] = mapped_column(primary_key=True)
+    space_id: Mapped[UUID] = mapped_column(primary_key=True, index=True)
     user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     role: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -261,6 +261,8 @@ class DocumentChunk(Base):
     position: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160))
     text: Mapped[str] = mapped_column(EncryptedText())
+    embedding: Mapped[str | None] = mapped_column(EncryptedText())
+    embedding_model: Mapped[str | None] = mapped_column(String(160))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -281,6 +283,8 @@ class KnowledgeAnswer(Base):
     question: Mapped[str] = mapped_column(EncryptedText())
     answer: Mapped[str] = mapped_column(EncryptedText())
     status: Mapped[str] = mapped_column(String(32))
+    generator: Mapped[str] = mapped_column(String(32), default="local")
+    model_name: Mapped[str | None] = mapped_column(String(160))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
