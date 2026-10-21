@@ -21,6 +21,9 @@ ENV LOCAL_STORAGE_PATH=/tmp/enterprise-ai-uploads
 
 WORKDIR /app
 COPY requirements.lock ./
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.lock
 COPY alembic.ini ./
 COPY migrations migrations

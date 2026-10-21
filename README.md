@@ -338,6 +338,12 @@ S3 兼容服务，而不改变业务数据模型。
 | `OBJECT_STORAGE_PREFIX` | 同一存储桶内的环境隔离前缀 | 无 |
 | `OBJECT_STORAGE_FORCE_PATH_STYLE` | MinIO 等服务是否强制 path-style URL | `false` |
 | `OBJECT_STORAGE_SSE` | 可选服务端加密算法，例如 AWS 的 `AES256` | 无 |
+| `BACKUP_ENCRYPTION_KEY` | 独立的 32 字节 Base64 数据库备份密钥 | 无；执行备份时必须设置 |
+| `BACKUP_STORAGE_BACKEND` | 备份后端：`local` 或 `s3`；生产只允许 `s3` | `local` |
+| `BACKUP_STORAGE_*` | 独立备份桶的 endpoint、凭据、bucket、region、prefix、SSE | 无 |
+| `BACKUP_RETENTION_DAYS` | 数据库备份保留天数，不能小于 35 | `35` |
+| `BACKUP_MIN_RECOVERY_POINTS` | 生命周期策略必须保留的最少恢复点 | `7` |
+| `AUDIT_RETENTION_DAYS` | 审计记录最低保留天数，不能小于 365 | `2555` |
 | `CORS_ORIGINS` | 允许访问 API 的 Web 来源，逗号分隔 | 本地 3000–3002 端口 |
 | `PUBLIC_DEMO_MODE` | 启用签名浏览器演示会话 | `false` |
 | `SESSION_SECRET` | 公开演示会话签名密钥 | 无；演示模式必须设置 |
@@ -430,6 +436,14 @@ curl -X POST http://localhost:8000/v1/tenants \
 正式生产部署必须使用持久对象存储和长期数据库，并接入企业 SSO、备份恢复、密钥管理、审计、
 监控告警和数据保留策略。
 
+### 加密备份与恢复演练
+
+仓库提供 `python -m enterprise_ai_api.backup` 运维命令，可创建独立密钥加密的 PostgreSQL 备份，
+校验清单后恢复到命名含 `_restore` 或 `_drill` 的隔离数据库，并验证 Alembic 版本和关键表。
+生产环境会拒绝把备份写入临时本地磁盘。完整的 Secret、定时任务、保留策略和演练步骤见
+[备份、恢复演练与数据保留](docs/06-backup-and-recovery.md)。Blueprint 没有自动创建可能产生费用的
+Render Cron Job；配置定时任务和私有备份桶之前，不能把公开演示环境视为已有可恢复备份。
+
 ## 常见问题
 
 ### `zsh: command not found: pnpm`
@@ -464,6 +478,7 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [x] 邮箱验证、密码重置、邀请邮件和数据库级登录限流
 - [x] 知识空间只读者/管理员 ACL 与检索隔离
 - [x] 企业管理员审计日志、拒绝事件记录与 PostgreSQL 追加式保护
+- [x] 独立密钥加密的 PostgreSQL 备份与隔离恢复演练工具
 - [ ] pgvector 关键词与语义混合检索
 - [ ] 可配置的大模型生成与引用校验
 - [ ] 决策证据包、人工审批和审计导出
@@ -482,3 +497,4 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [横向产品策略决策](docs/decisions/ADR-0001-horizontal-product-strategy.md)
 - [初始技术栈提案](docs/decisions/ADR-0002-initial-technology-stack.md)
 - [安全、身份与加密设计](docs/05-security-and-access-control.md)
+- [备份、恢复演练与数据保留](docs/06-backup-and-recovery.md)
