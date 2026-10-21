@@ -40,6 +40,30 @@ python3 -m venv .venv
 
 API 健康检查位于 `http://localhost:8000/healthz`。
 
+首次纵向功能切片已经提供以下接口：
+
+```text
+POST /v1/tenants
+GET  /v1/tenants/{tenant_id}
+POST /v1/tenants/{tenant_id}/members
+POST /v1/tenants/{tenant_id}/spaces
+GET  /v1/tenants/{tenant_id}/spaces
+```
+
+未设置 `DATABASE_URL` 时，API 使用进程内 SQLite，适合立即体验和运行测试。打开
+`http://localhost:8000/docs` 可在 Swagger UI 中调用接口。当前身份适配器使用
+`X-Dev-User-Id` 请求头模拟已验证用户，例如：
+
+```bash
+curl -X POST http://localhost:8000/v1/tenants \
+  -H 'Content-Type: application/json' \
+  -H 'X-Dev-User-Id: 00000000-0000-0000-0000-000000000001' \
+  -d '{"name":"示例企业"}'
+```
+
+`X-Dev-User-Id` 仅用于本地纵向切片；接入企业 SSO 后必须由服务端验证的身份声明替代，
+不能在生产环境信任客户端自报的用户 ID。
+
 ### 本地依赖服务
 
 安装 Docker 后运行：
@@ -49,6 +73,18 @@ docker compose -f infra/docker-compose.yml up -d
 ```
 
 这将启动带 pgvector 的 PostgreSQL 和 S3 兼容对象存储。`.env.example` 中仅包含本地开发占位凭据，不得用于共享或生产环境。
+
+PostgreSQL 启动后，先以表所有者执行迁移，再以不具备 `BYPASSRLS` 权限的运行账户启动 API：
+
+```bash
+MIGRATION_DATABASE_URL='postgresql+psycopg://app_owner:local-development-only@localhost:5432/enterprise_ai' \
+  .venv/bin/alembic upgrade head
+DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:5432/enterprise_ai' \
+  .venv/bin/uvicorn enterprise_ai_api.main:app --app-dir services/api/src --reload
+```
+
+迁移会为 `tenants`、`memberships` 和 `spaces` 启用并强制执行 PostgreSQL 行级安全。
+应用层仍会在每个用例执行显式授权，构成两层隔离。
 
 `requirements-dev.txt` 记录直接 Python 依赖，`requirements.lock` 和 `pnpm-lock.yaml` 固定完整依赖解析结果。
 
