@@ -4,6 +4,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 
 import {
   ApiError,
+  Account,
   Classification,
   DocumentSummary,
   KnowledgeAnswer,
@@ -11,16 +12,22 @@ import {
   MembershipRole,
   Space,
   Tenant,
+  acceptInvitation,
   askKnowledgeQuestion,
+  createInvitation,
   createSpace,
   createTenant,
+  getCurrentAccount,
   getTenant,
+  loginAccount,
   listDocuments,
   listMembers,
   listQuestionHistory,
   listSpaces,
   openBrowserSession,
   publishDocumentVersion,
+  registerAccount,
+  logoutAccount,
   saveMember,
   uploadDocument,
   uploadDocumentVersion,
@@ -31,6 +38,7 @@ type View = "overview" | "assistant" | "spaces" | "documents" | "members";
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
 const PUBLIC_DEMO = process.env.NEXT_PUBLIC_APP_MODE === "public-demo";
+const ACCOUNT_MODE = process.env.NEXT_PUBLIC_APP_MODE === "accounts";
 
 const roleLabels: Record<MembershipRole, string> = {
   enterprise_admin: "企业管理员",
@@ -86,6 +94,7 @@ function formatLocator(value: string): string {
 
 export default function Dashboard() {
   const [actorId, setActorId] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
@@ -139,6 +148,18 @@ export default function Dashboard() {
       const storedActor = window.localStorage.getItem(ACTOR_KEY) ?? crypto.randomUUID();
       const storedTenant = window.localStorage.getItem(TENANT_KEY);
       try {
+        if (ACCOUNT_MODE) {
+          const account = await getCurrentAccount();
+          if (cancelled) return;
+          setActorId(account.user_id);
+          setAccountEmail(account.email);
+          setTenantId(account.tenant_id);
+          if (account.tenant_id) {
+            window.localStorage.setItem(TENANT_KEY, account.tenant_id);
+            await loadWorkspace(account.user_id, account.tenant_id);
+          }
+          return;
+        }
         const session = await openBrowserSession(storedActor);
         if (cancelled) return;
         window.localStorage.setItem(ACTOR_KEY, session.user_id);
@@ -148,6 +169,12 @@ export default function Dashboard() {
         if (!storedTenant) return;
         await loadWorkspace(session.user_id, storedTenant);
       } catch (error: unknown) {
+          if (ACCOUNT_MODE && error instanceof ApiError && error.status === 401) {
+            setActorId("");
+            setAccountEmail("");
+            setTenantId(null);
+            return;
+          }
           if (error instanceof ApiError && error.status === 404) {
             window.localStorage.removeItem(TENANT_KEY);
             setTenantId(null);
@@ -169,6 +196,48 @@ export default function Dashboard() {
     () => members.find((member) => member.user_id === actorId),
     [actorId, members],
   );
+
+  const finishAccountSignIn = useCallback(async (account: Account) => {
+    setActorId(account.user_id);
+    setAccountEmail(account.email);
+    setTenantId(account.tenant_id);
+    if (account.tenant_id) {
+      window.localStorage.setItem(TENANT_KEY, account.tenant_id);
+      await loadWorkspace(account.user_id, account.tenant_id);
+    }
+  }, [loadWorkspace]);
+
+  async function handleAcceptAccess(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      const account = await acceptInvitation(
+        String(form.get("tenant_id") ?? "").trim(),
+        String(form.get("invite_token") ?? "").trim(),
+      );
+      await finishAccountSignIn(account);
+      setNotice("企业邀请已接受");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "接受邀请失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (ACCOUNT_MODE) await logoutAccount();
+    window.localStorage.removeItem(TENANT_KEY);
+    setActorId("");
+    setAccountEmail("");
+    setTenantId(null);
+    setTenant(null);
+    setSpaces([]);
+    setDocumentsBySpace({});
+    setAnswers([]);
+    setMembers([]);
+  }
 
   async function handleCreateTenant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -223,13 +292,29 @@ export default function Dashboard() {
     setBusy(true);
     setNotice(null);
     try {
-      await saveMember(actorId, tenantId, {
-        user_id: String(form.get("user_id") ?? "").trim(),
-        role: String(form.get("role")) as MembershipRole,
-      });
-      setMembers(await listMembers(actorId, tenantId));
+      if (ACCOUNT_MODE) {
+        const invitation = await createInvitation(actorId, tenantId, {
+          email: String(form.get("email") ?? "").trim(),
+          role: String(form.get("role")) as MembershipRole,
+        });
+        const link = `${window.location.origin}/?tenant=${tenantId}&invite=${invitation.invite_token}`;
+        let copied = false;
+        try {
+          await navigator.clipboard?.writeText(link);
+          copied = Boolean(navigator.clipboard);
+        } catch {
+          copied = false;
+        }
+        setNotice(copied ? `邀请链接已复制，有效期至 ${formatDate(invitation.expires_at)}` : `请复制邀请链接：${link}`);
+      } else {
+        await saveMember(actorId, tenantId, {
+          user_id: String(form.get("user_id") ?? "").trim(),
+          role: String(form.get("role")) as MembershipRole,
+        });
+        setMembers(await listMembers(actorId, tenantId));
+        setNotice("成员权限已保存");
+      }
       setMemberDialog(false);
-      setNotice("成员权限已保存");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存成员失败");
     } finally {
@@ -321,7 +406,21 @@ export default function Dashboard() {
     return <div className="loading-screen"><span className="spinner" />正在载入安全工作区</div>;
   }
 
+  if (ACCOUNT_MODE && !actorId) {
+    return <AuthScreen busy={busy} onBusy={setBusy} onReady={finishAccountSignIn} />;
+  }
+
   if (!tenant) {
+    if (ACCOUNT_MODE) {
+      return <AccountAccessSetup
+        email={accountEmail}
+        busy={busy}
+        notice={notice}
+        onCreate={handleCreateTenant}
+        onAccept={handleAcceptAccess}
+        onLogout={handleLogout}
+      />;
+    }
     return (
       <main className="onboarding">
         <section className="onboarding-story">
@@ -386,7 +485,7 @@ export default function Dashboard() {
       <section className="workspace">
         <header className="topbar">
           <button className="tenant-switcher"><span>{tenant.name.slice(0, 1)}</span><div><small>当前企业</small><b>{tenant.name}</b></div></button>
-          <div className="topbar-user"><div><b>{PUBLIC_DEMO ? "演示管理员" : "本地演示管理员"}</b><span>{actorMembership ? roleLabels[actorMembership.role] : "已授权成员"}</span></div><i>{actorId.slice(0, 2).toUpperCase()}</i></div>
+          <div className="topbar-user"><div><b>{ACCOUNT_MODE ? accountEmail : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员"}</b><span>{actorMembership ? roleLabels[actorMembership.role] : "已授权成员"}</span></div><i>{(accountEmail || actorId).slice(0, 2).toUpperCase()}</i></div>
         </header>
 
         <div className="content">
@@ -420,7 +519,7 @@ export default function Dashboard() {
           {view === "members" && (
             <MembersView members={members} actorId={actorId} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} />
           )}
-          <footer className="workspace-footer">企业 ID {shortId(tenant.id)}<button onClick={resetDemo}>切换演示企业</button></footer>
+          <footer className="workspace-footer">企业 ID {shortId(tenant.id)}<button onClick={ACCOUNT_MODE ? handleLogout : resetDemo}>{ACCOUNT_MODE ? "安全退出" : "切换演示企业"}</button></footer>
         </div>
       </section>
 
@@ -432,9 +531,11 @@ export default function Dashboard() {
         </form>
       </Dialog>}
 
-      {memberDialog && <Dialog title="添加企业成员" description="当前阶段使用用户 UUID 模拟来自企业身份系统的用户。" onClose={() => setMemberDialog(false)}>
+      {memberDialog && <Dialog title={ACCOUNT_MODE ? "邀请企业成员" : "添加企业成员"} description={ACCOUNT_MODE ? "成员必须使用被邀请的邮箱注册或登录后接受邀请。" : "当前阶段使用用户 UUID 模拟来自企业身份系统的用户。"} onClose={() => setMemberDialog(false)}>
         <form className="dialog-form" onSubmit={handleAddMember}>
-          <label>用户 UUID<div className="input-action"><input name="user_id" defaultValue={crypto.randomUUID()} pattern="[0-9a-fA-F-]{36}" required /><button type="button" onClick={(event) => { const input = event.currentTarget.previousElementSibling as HTMLInputElement; input.value = crypto.randomUUID(); }}>重新生成</button></div></label>
+          {ACCOUNT_MODE
+            ? <label>企业邮箱<input name="email" type="email" autoComplete="email" placeholder="name@company.com" required /></label>
+            : <label>用户 UUID<div className="input-action"><input name="user_id" defaultValue={crypto.randomUUID()} pattern="[0-9a-fA-F-]{36}" required /><button type="button" onClick={(event) => { const input = event.currentTarget.previousElementSibling as HTMLInputElement; input.value = crypto.randomUUID(); }}>重新生成</button></div></label>}
           <label>企业角色<select name="role" defaultValue="member"><option value="member">普通成员</option><option value="knowledge_admin">知识管理员</option><option value="enterprise_admin">企业管理员</option></select></label>
           <div className="dialog-actions"><button type="button" onClick={() => setMemberDialog(false)}>取消</button><button className="primary-button" disabled={busy} type="submit">{busy ? "保存中…" : "添加成员"}</button></div>
         </form>
@@ -454,6 +555,88 @@ export default function Dashboard() {
       </Dialog>}
     </main>
   );
+}
+
+function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: boolean) => void; onReady: (account: Account) => Promise<void> }) {
+  const [invitation] = useState(() => new URLSearchParams(window.location.search).get("invite") ?? "");
+  const [invitationTenant] = useState(() => new URLSearchParams(window.location.search).get("tenant") ?? "");
+  const [mode, setMode] = useState<"login" | "create" | "join">(invitation ? "join" : "login");
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const email = String(form.get("email") ?? "").trim();
+    const password = String(form.get("password") ?? "");
+    onBusy(true);
+    setError(null);
+    try {
+      if (mode === "login") {
+        await onReady(await loginAccount(email, password));
+      } else if (mode === "create") {
+        await onReady(await registerAccount({
+          email,
+          password,
+          organization_name: String(form.get("organization_name") ?? "").trim(),
+        }));
+      } else {
+        let account: Account;
+        try {
+          account = await registerAccount({ email, password });
+        } catch (registrationError) {
+          if (!(registrationError instanceof ApiError) || registrationError.status !== 409) throw registrationError;
+          account = await loginAccount(email, password);
+        }
+        const accepted = await acceptInvitation(
+          String(form.get("tenant_id") ?? "").trim(),
+          String(form.get("invite_token") ?? "").trim(),
+        );
+        await onReady({ ...accepted, email: account.email });
+      }
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "认证失败");
+    } finally {
+      onBusy(false);
+    }
+  }
+
+  return <main className="onboarding auth-page">
+    <section className="onboarding-story">
+      <div className="brand-mark"><span>EA</span> Enterprise AI</div>
+      <div><p className="kicker">身份先于知识</p><h1>企业知识，<br />只对授权成员开放</h1><p className="onboarding-copy">账号、企业成员关系和知识权限由服务端共同校验。输入企业名称不能进入他人的工作区。</p></div>
+      <div className="trust-list"><span><Icon name="shield" />服务端安全会话</span><span><Icon name="shield" />数据库字段加密</span><span><Icon name="shield" />上传原件认证加密</span></div>
+    </section>
+    <section className="onboarding-form-wrap">
+      <form className="onboarding-form" onSubmit={submit}>
+        <div className="auth-tabs">
+          <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>登录</button>
+          <button className={mode === "create" ? "active" : ""} type="button" onClick={() => setMode("create")}>创建企业</button>
+          <button className={mode === "join" ? "active" : ""} type="button" onClick={() => setMode("join")}>接受邀请</button>
+        </div>
+        <h2>{mode === "login" ? "欢迎回来" : mode === "create" ? "创建企业账号" : "加入企业"}</h2>
+        <p>{mode === "login" ? "使用已授权的企业账号进入。" : mode === "create" ? "创建者将成为首位企业管理员。" : "邀请邮箱必须与注册邮箱一致。"}</p>
+        <label>邮箱<input name="email" type="email" autoComplete="email" placeholder="name@company.com" required /></label>
+        <label>密码<input name="password" type="password" minLength={12} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="至少 12 个字符" required /></label>
+        {mode === "create" && <label>企业名称<input name="organization_name" minLength={2} maxLength={160} placeholder="例如：远景科技" required /></label>}
+        {mode === "join" && <><label>企业 ID<input name="tenant_id" defaultValue={invitationTenant} required /></label><label>邀请令牌<input name="invite_token" defaultValue={invitation} required /></label></>}
+        <button className="primary-button wide" disabled={busy} type="submit">{busy ? "正在验证…" : mode === "login" ? "安全登录" : mode === "create" ? "创建并进入" : "验证邀请并加入"}<Icon name="arrow" /></button>
+        <p className="security-note"><Icon name="shield" />密码使用 scrypt 加盐哈希，系统不会保存明文密码。</p>
+        {error && <p className="form-error">{error}</p>}
+      </form>
+    </section>
+  </main>;
+}
+
+function AccountAccessSetup({ email, busy, notice, onCreate, onAccept, onLogout }: { email: string; busy: boolean; notice: string | null; onCreate: (event: FormEvent<HTMLFormElement>) => Promise<void>; onAccept: (event: FormEvent<HTMLFormElement>) => Promise<void>; onLogout: () => Promise<void> }) {
+  return <main className="onboarding auth-page">
+    <section className="onboarding-story"><div className="brand-mark"><span>EA</span> Enterprise AI</div><div><p className="kicker">账号已登录</p><h1>选择你的<br />企业访问方式</h1><p className="onboarding-copy">你可以创建新的企业工作区，或使用管理员发给你的邀请加入已有企业。</p></div><div className="trust-list"><span><Icon name="shield" />{email}</span></div></section>
+    <section className="onboarding-form-wrap"><div className="access-options">
+      <form className="onboarding-form compact-form" onSubmit={onCreate}><span className="step-label">企业创建者</span><h2>创建新企业</h2><p>你将自动成为企业管理员。</p><label>企业名称<input name="name" minLength={2} maxLength={160} required /></label><button className="primary-button wide" disabled={busy}>创建工作区</button></form>
+      <div className="option-divider">或者</div>
+      <form className="onboarding-form compact-form" onSubmit={onAccept}><span className="step-label">受邀成员</span><h2>接受邀请</h2><p>权限由邀请你的管理员指定。</p><label>企业 ID<input name="tenant_id" required /></label><label>邀请令牌<input name="invite_token" required /></label><button className="primary-button wide" disabled={busy}>加入企业</button></form>
+      {notice && <p className="form-error">{notice}</p>}<button className="text-button" type="button" onClick={onLogout}>退出当前账号</button>
+    </div></section>
+  </main>;
 }
 
 function Overview({ tenant, spaces, members, answers, documentsBySpace, onCreateSpace, onViewSpaces, onOpenSpace, onOpenAssistant }: { tenant: Tenant; spaces: Space[]; members: Membership[]; answers: KnowledgeAnswer[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreateSpace: () => void; onViewSpaces: () => void; onOpenSpace: (space: Space) => void; onOpenAssistant: () => void }) {
@@ -533,7 +716,7 @@ function DocumentsView({ space, documents, busy, onBack, onUpload, onNewVersion,
 
 function MembersView({ members, actorId, canManage, onAdd }: { members: Membership[]; actorId: string; canManage: boolean; onAdd: () => void }) {
   return <><div className="page-heading"><div><p className="kicker">访问控制</p><h1>成员与权限</h1><p>企业角色决定成员能够管理和访问哪些内容。</p></div>{canManage && <button className="primary-button" onClick={onAdd}><Icon name="plus" />添加成员</button>}</div>
-    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
+    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (ACCOUNT_MODE ? "当前账号" : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
   </>;
 }
 

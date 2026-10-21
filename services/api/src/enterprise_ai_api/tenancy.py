@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -10,8 +11,9 @@ from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from enterprise_ai_api.database import set_tenant_context
-from enterprise_ai_api.models import Membership, Tenant, User
+from enterprise_ai_api.crypto import token_hash
+from enterprise_ai_api.database import get_session, set_tenant_context
+from enterprise_ai_api.models import AuthSession, Membership, Tenant, User
 from enterprise_ai_core.security import (
     AccessContext,
     Action,
@@ -47,11 +49,41 @@ def verify_demo_session(token: str | None, secret: str) -> UUID | None:
 
 def current_user_id(
     request: Request,
+    session: Annotated[Session, Depends(get_session)],
     development_user_id: Annotated[UUID | None, Header(alias="X-Dev-User-Id")] = None,
     demo_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
+    account_session: Annotated[
+        str | None, Cookie(alias="enterprise_ai_session")
+    ] = None,
 ) -> UUID:
     """Resolve a local dev header or a server-signed public-demo browser session."""
 
+    if request.app.state.account_auth:
+        if account_session is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+        stored = session.scalar(
+            select(AuthSession).where(AuthSession.token_hash == token_hash(account_session))
+        )
+        if stored is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+        expires_at = stored.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        user = session.get(User, stored.user_id)
+        if expires_at <= datetime.now(UTC) or user is None or user.status != "active":
+            session.delete(stored)
+            session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+        return stored.user_id
     if request.app.state.public_demo:
         user_id = verify_demo_session(demo_session, request.app.state.session_secret)
         if user_id is None:

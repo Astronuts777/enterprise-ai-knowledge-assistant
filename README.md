@@ -13,14 +13,15 @@
 
 当前版本已经打通一条可操作的企业知识闭环：
 
-1. 创建独立的企业工作区，创建者自动成为企业管理员。
-2. 按部门、项目或业务主题创建知识空间，并设置内部、机密或严格受限等级。
-3. 添加企业成员，分配企业管理员、知识管理员或普通成员角色。
-4. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
-5. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
-6. 只针对已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
-7. 在资料不足时明确拒答，不用没有来源的内容补全答案。
-8. 保存当前用户自己的问答历史，并阻止跨企业读取数据。
+1. 使用邮箱和密码注册，创建独立企业工作区，创建者自动成为企业管理员。
+2. 由管理员向指定邮箱签发限时、一次性邀请，成员不能通过输入企业名称自行加入。
+3. 按部门、项目或业务主题创建知识空间，并设置内部、机密或严格受限等级。
+4. 为受邀成员分配企业管理员、知识管理员或普通成员角色。
+5. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
+6. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
+7. 只针对已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
+8. 在资料不足时明确拒答，不用没有来源的内容补全答案。
+9. 保存当前用户自己的问答历史，并阻止跨企业读取数据。
 
 适合用来验证以下场景：
 
@@ -34,8 +35,9 @@
 
 - 问答使用透明、可重复的本地关键词检索和原文摘录，尚未调用外部大模型。
 - 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
-- 本地开发身份通过 `X-Dev-User-Id` 模拟；公开演示使用服务端签名的 HttpOnly 会话。
-- 企业 SSO、SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和完整审计仍在路线图中。
+- 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
+- 当前管理员需要手动把邀请链接安全地发送给成员；自动邮件验证、密码重置和企业 SSO 尚未接入。
+- SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和完整审计仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
@@ -168,6 +170,26 @@ cp apps/web/.env.example apps/web/.env.local
 
 再修改 `apps/web/.env.local` 中的 `NEXT_PUBLIC_API_URL`。
 
+#### 本地验证正式账号模式
+
+先生成并妥善保存一个本地加密密钥：
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+使用该输出分别启动 API 和账号版 Web：
+
+```bash
+APP_ENV=development ACCOUNT_AUTH_MODE=true ENCRYPTION_MASTER_KEY='<刚生成的密钥>' \
+  PYTHONPATH=services/api/src:packages/core/src \
+  .venv/bin/uvicorn enterprise_ai_api.main:app --reload --host 127.0.0.1 --port 8000
+
+NEXT_PUBLIC_APP_MODE=accounts pnpm dev:web
+```
+
+同一个本地数据库必须持续使用同一密钥；密钥变化后，之前加密的数据将无法解密。
+
 ### 5. 使用 PyCharm 启动
 
 1. 用 PyCharm 打开仓库根目录。
@@ -221,6 +243,19 @@ git push -u origin codex/feature-name
 
 ## 数据库与文件存储
 
+### 加密策略
+
+- 密码使用带随机盐的 scrypt 单向哈希，数据库中没有可还原的明文密码。
+- 邮箱使用 AES-256-GCM 加密保存，另用带密钥 HMAC 摘要完成精确账号查询。
+- 文档解析正文、问题、回答和引用摘录在进入数据库前使用 AES-256-GCM 认证加密。
+- 上传原件只在内存中完成首轮解析，落盘前加密为 `payload.enc`，不保留明文原件。
+- 文件重复检测使用带密钥内容摘要，避免公开 SHA-256 暴露已知文件是否存在。
+- 数据库中的 UUID、角色、状态和时间等索引元数据保持明文，以支持授权、关联和运维查询。
+- PostgreSQL 或磁盘的整盘加密由部署平台负责；应用层加密是额外保护，不能替代数据库备份和访问控制。
+
+`ENCRYPTION_MASTER_KEY` 必须是部署平台生成并安全保存的高熵密钥。不要把它写入 Git；不要随意更换或删除，
+否则已有密文和加密文件将无法读取。正式轮换需要先增加密钥版本和重加密流程。
+
 ### 默认 SQLite 模式
 
 不设置 `DATABASE_URL` 时：
@@ -259,6 +294,8 @@ PostgreSQL 迁移会启用并强制执行租户行级安全。应用层仍执行
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
 | `APP_ENV` | 环境标识 | `development` |
+| `ACCOUNT_AUTH_MODE` | 启用邮箱密码账号、服务端会话和企业邀请 | `false` |
+| `ENCRYPTION_MASTER_KEY` | 数据字段、令牌摘要和上传文件的主密钥 | 本地使用开发密钥；公网必须设置 |
 | `DATABASE_URL` | API 运行数据库 | 本地 SQLite |
 | `MIGRATION_DATABASE_URL` | Alembic 迁移数据库 | `alembic.ini` 中的本地 PostgreSQL |
 | `LOCAL_STORAGE_PATH` | 上传文件目录 | `data/local/uploads` |
@@ -274,10 +311,16 @@ PostgreSQL 迁移会启用并强制执行租户行级安全。应用层仍执行
 
 ```text
 POST /v1/session
+POST /v1/auth/register
+POST /v1/auth/login
+POST /v1/auth/logout
+GET  /v1/auth/me
+POST /v1/auth/invitations/{tenant_id}/accept
 POST /v1/tenants
 GET  /v1/tenants/{tenant_id}
 POST /v1/tenants/{tenant_id}/members
 GET  /v1/tenants/{tenant_id}/members
+POST /v1/tenants/{tenant_id}/invitations
 POST /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces
 POST /v1/tenants/{tenant_id}/spaces/{space_id}/documents
@@ -291,7 +334,7 @@ GET  /v1/tenants/{tenant_id}/questions
 GET  /healthz
 ```
 
-本地模式可使用 `X-Dev-User-Id` 模拟身份：
+默认本地开发模式可使用 `X-Dev-User-Id` 模拟身份：
 
 ```bash
 curl -X POST http://localhost:8000/v1/tenants \
@@ -306,11 +349,11 @@ curl -X POST http://localhost:8000/v1/tenants \
 
 ### Render 公开演示环境
 
-`Dockerfile` 会构建 Next.js 静态页面，并把它与 FastAPI 放入同一镜像。`render.yaml` 会创建：
+`Dockerfile` 会构建账号登录版 Next.js 页面，并把它与 FastAPI 放入同一镜像。`render.yaml` 会创建：
 
 - 一个 Docker Web Service；
 - 一个 PostgreSQL 数据库；
-- `SESSION_SECRET` 等演示环境变量；
+- `ACCOUNT_AUTH_MODE` 和独立生成的 `ENCRYPTION_MASTER_KEY`；
 - `/healthz` 健康检查。
 
 一键创建：
@@ -365,6 +408,9 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [x] 文档上传、解析、版本和发布
 - [x] 权限感知的证据问答、引用与拒答
 - [x] SQLite 本地开发与 PostgreSQL 演示部署
+- [x] 邮箱密码账号、服务端会话和限时企业邀请
+- [x] 敏感数据库字段与上传原件的 AES-256-GCM 加密
+- [ ] 邮箱验证、密码重置、邀请邮件和登录限流
 - [ ] pgvector 关键词与语义混合检索
 - [ ] 可配置的大模型生成与引用校验
 - [ ] 决策证据包、人工审批和审计事件
@@ -382,3 +428,4 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [AI 协作记录](docs/ai-development-log.md)
 - [横向产品策略决策](docs/decisions/ADR-0001-horizontal-product-strategy.md)
 - [初始技术栈提案](docs/decisions/ADR-0002-initial-technology-stack.md)
+- [安全、身份与加密设计](docs/05-security-and-access-control.md)

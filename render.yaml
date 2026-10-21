@@ -8,10 +8,12 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: APP_ENV
-        value: public-demo
-      - key: PUBLIC_DEMO_MODE
+        value: production
+      - key: ACCOUNT_AUTH_MODE
         value: "true"
-      - key: SESSION_SECRET
+      - key: PUBLIC_DEMO_MODE
+        value: "false"
+      - key: ENCRYPTION_MASTER_KEY
         generateValue: true
       - key: DATABASE_URL
         fromDatabase:

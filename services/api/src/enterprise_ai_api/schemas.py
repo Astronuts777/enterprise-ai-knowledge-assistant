@@ -38,6 +38,41 @@ class MembershipResponse(BaseModel):
     created_at: datetime
 
 
+class AccountRegister(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=12, max_length=200)
+    organization_name: str | None = Field(default=None, min_length=2, max_length=160)
+
+
+class AccountLogin(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class AccountResponse(BaseModel):
+    user_id: UUID
+    email: str
+    tenant_id: UUID | None
+
+
+class InvitationCreate(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    role: TenantRole = "member"
+
+
+class InvitationResponse(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    email: str
+    role: TenantRole
+    expires_at: datetime
+    invite_token: str
+
+
+class InvitationAccept(BaseModel):
+    token: str = Field(min_length=32, max_length=200)
+
+
 class SpaceCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     classification: Classification = "internal"

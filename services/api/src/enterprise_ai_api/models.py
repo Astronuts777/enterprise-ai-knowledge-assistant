@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from enterprise_ai_api.crypto import EncryptedText
 from enterprise_ai_api.database import Base
 
 
@@ -34,7 +35,42 @@ class User(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     external_subject: Mapped[str] = mapped_column(String(255), unique=True)
+    email_ciphertext: Mapped[str | None] = mapped_column(EncryptedText())
+    email_lookup_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    default_tenant_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL")
+    )
     status: Mapped[str] = mapped_column(String(32), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    email_ciphertext: Mapped[str] = mapped_column(EncryptedText())
+    email_lookup_hash: Mapped[str] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(32))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    invited_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -137,7 +173,7 @@ class DocumentChunk(Base):
     )
     position: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160))
-    text: Mapped[str] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(EncryptedText())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -155,8 +191,8 @@ class KnowledgeAnswer(Base):
         ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
-    question: Mapped[str] = mapped_column(Text)
-    answer: Mapped[str] = mapped_column(Text)
+    question: Mapped[str] = mapped_column(EncryptedText())
+    answer: Mapped[str] = mapped_column(EncryptedText())
     status: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -186,5 +222,5 @@ class AnswerCitation(Base):
     filename: Mapped[str] = mapped_column(String(255))
     version_number: Mapped[int] = mapped_column(Integer)
     locator: Mapped[str] = mapped_column(String(160))
-    excerpt: Mapped[str] = mapped_column(Text)
+    excerpt: Mapped[str] = mapped_column(EncryptedText())
     relevance_score: Mapped[float] = mapped_column(Float)

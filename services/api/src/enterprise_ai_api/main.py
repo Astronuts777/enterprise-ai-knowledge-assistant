@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from enterprise_ai_api.auth_routes import router as auth_router
+from enterprise_ai_api.crypto import require_production_key
 from enterprise_ai_api.database import (
     Base,
     create_database_engine,
@@ -58,6 +60,7 @@ def create_app(
     storage_root: str | None = None,
     *,
     public_demo: bool | None = None,
+    account_auth: bool | None = None,
     session_secret: str | None = None,
 ) -> FastAPI:
     application = FastAPI(
@@ -70,12 +73,21 @@ def create_app(
     engine = create_database_engine(resolved_database_url)
     application.state.engine = engine
     application.state.session_factory = create_session_factory(engine)
+    application.state.app_env = os.getenv("APP_ENV", "development").lower()
+    application.state.account_auth = (
+        os.getenv("ACCOUNT_AUTH_MODE", "").lower() in {"1", "true", "yes"}
+        if account_auth is None
+        else account_auth
+    )
     application.state.public_demo = (
         os.getenv("PUBLIC_DEMO_MODE", "").lower() in {"1", "true", "yes"}
         if public_demo is None
         else public_demo
     )
     application.state.session_secret = session_secret or os.getenv("SESSION_SECRET", "")
+    if application.state.account_auth and application.state.public_demo:
+        raise RuntimeError("ACCOUNT_AUTH_MODE and PUBLIC_DEMO_MODE cannot both be enabled")
+    require_production_key()
     if application.state.public_demo and not application.state.session_secret:
         raise RuntimeError("SESSION_SECRET is required when PUBLIC_DEMO_MODE is enabled")
     application.state.storage_root = (
@@ -124,6 +136,7 @@ def create_app(
         )
         return SessionResponse(user_id=user_id, mode="public_demo")
 
+    application.include_router(auth_router, tags=["authentication"])
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
     application.include_router(question_router, tags=["knowledge-answers"])

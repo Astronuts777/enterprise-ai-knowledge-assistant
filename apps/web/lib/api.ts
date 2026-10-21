@@ -97,6 +97,21 @@ export type BrowserSession = {
   mode: "development" | "public_demo";
 };
 
+export type Account = {
+  user_id: string;
+  email: string;
+  tenant_id: string | null;
+};
+
+export type Invitation = {
+  id: string;
+  tenant_id: string;
+  email: string;
+  role: MembershipRole;
+  expires_at: string;
+  invite_token: string;
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -128,6 +143,65 @@ async function request<T>(path: string, actorId: string, init?: RequestInit): Pr
   }
 
   return response.json() as Promise<T>;
+}
+
+async function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    cache: "no-store",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) throw await apiError(response);
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+export function getCurrentAccount(): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/me");
+}
+
+export function registerAccount(input: {
+  email: string;
+  password: string;
+  organization_name?: string;
+}): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function loginAccount(email: string, password: string): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function logoutAccount(): Promise<void> {
+  return accountRequest<void>("/v1/auth/logout", { method: "POST" });
+}
+
+export function createInvitation(
+  actorId: string,
+  tenantId: string,
+  input: { email: string; role: MembershipRole },
+): Promise<Invitation> {
+  return request<Invitation>(`/v1/tenants/${tenantId}/invitations`, actorId, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function acceptInvitation(tenantId: string, token: string): Promise<Account> {
+  return accountRequest<Account>(`/v1/auth/invitations/${tenantId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 }
 
 export async function openBrowserSession(actorId: string): Promise<BrowserSession> {

@@ -8,7 +8,7 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web apps/web
 ENV NEXT_OUTPUT_MODE=export
 ENV NEXT_PUBLIC_API_URL=""
-ENV NEXT_PUBLIC_APP_MODE=public-demo
+ENV NEXT_PUBLIC_APP_MODE=accounts
 RUN pnpm build:web
 
 FROM python:3.13-slim AS runtime

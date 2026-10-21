@@ -1,6 +1,5 @@
 """Permission-aware document upload, version, preview, and publication endpoints."""
 
-import hashlib
 import mimetypes
 import os
 from datetime import UTC, datetime
@@ -12,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.crypto import content_fingerprint, encrypt_bytes
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.document_processing import (
     MAX_UPLOAD_BYTES,
@@ -98,7 +98,7 @@ def _add_version(
     media_type: str | None,
     content: bytes,
 ) -> DocumentVersion:
-    content_hash = hashlib.sha256(content).hexdigest()
+    content_hash = content_fingerprint(content)
     duplicate = session.scalar(
         select(DocumentVersion).where(
             DocumentVersion.document_id == document.id,
@@ -118,10 +118,11 @@ def _add_version(
     )
     version_id = uuid4()
     version_number = (latest_number or 0) + 1
-    object_key = str(Path(str(tenant_id)) / str(document.id) / str(version_id) / filename)
+    object_key = str(Path(str(tenant_id)) / str(document.id) / str(version_id) / "payload.enc")
     target = storage_root / object_key
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
+    encryption_context = f"{tenant_id}:{document.id}:{version_id}".encode()
+    target.write_bytes(encrypt_bytes(content, context=encryption_context))
 
     try:
         parsed_chunks = parse_document(content, extension)
