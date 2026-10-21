@@ -10,6 +10,7 @@ from enterprise_ai_api.main import create_app
 ADMIN_A = UUID("00000000-0000-0000-0000-00000000000a")
 ADMIN_B = UUID("00000000-0000-0000-0000-00000000000b")
 MEMBER_A = UUID("00000000-0000-0000-0000-000000000001")
+MEMBER_B = UUID("00000000-0000-0000-0000-000000000002")
 
 
 def headers(user_id: UUID) -> dict[str, str]:
@@ -170,6 +171,88 @@ def test_member_cannot_upload_and_other_tenant_cannot_list(tmp_path: Path) -> No
     assert member_upload.status_code == 403
     assert cross_tenant_list.status_code == 404
     assert list((tmp_path / "uploads").rglob("*")) == []
+
+
+def test_viewer_reads_only_published_content_and_manager_can_preview_draft(
+    tmp_path: Path,
+) -> None:
+    app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"))
+    with TestClient(app) as test_client:
+        tenant_id, space_id = create_workspace(test_client, ADMIN_A, "Acme")
+        uploaded = test_client.post(
+            f"/v1/tenants/{tenant_id}/spaces/{space_id}/documents",
+            data={"title": "Security policy"},
+            files={"file": ("security-v1.md", b"Published security guidance.")},
+            headers=headers(ADMIN_A),
+        ).json()
+        document_id = uploaded["document"]["id"]
+        test_client.post(
+            f"/v1/tenants/{tenant_id}/document-versions/"
+            f"{uploaded['version']['id']}/publish",
+            headers=headers(ADMIN_A),
+        )
+        draft = test_client.post(
+            f"/v1/tenants/{tenant_id}/documents/{document_id}/versions",
+            files={"file": ("security-v2.md", b"Unpublished replacement guidance.")},
+            headers=headers(ADMIN_A),
+        )
+        for member_id in (MEMBER_A, MEMBER_B):
+            test_client.post(
+                f"/v1/tenants/{tenant_id}/members",
+                json={"user_id": str(member_id), "role": "member"},
+                headers=headers(ADMIN_A),
+            )
+        test_client.post(
+            f"/v1/tenants/{tenant_id}/spaces/{space_id}/members",
+            json={"user_id": str(MEMBER_A), "role": "viewer"},
+            headers=headers(ADMIN_A),
+        )
+
+        viewer_list = test_client.get(
+            f"/v1/tenants/{tenant_id}/spaces/{space_id}/documents",
+            headers=headers(MEMBER_A),
+        )
+        viewer_content = test_client.get(
+            f"/v1/tenants/{tenant_id}/documents/{document_id}/content",
+            headers=headers(MEMBER_A),
+        )
+        viewer_detail = test_client.get(
+            f"/v1/tenants/{tenant_id}/documents/{document_id}",
+            headers=headers(MEMBER_A),
+        )
+        manager_content = test_client.get(
+            f"/v1/tenants/{tenant_id}/documents/{document_id}/content",
+            headers=headers(ADMIN_A),
+        )
+        ungranted_content = test_client.get(
+            f"/v1/tenants/{tenant_id}/documents/{document_id}/content",
+            headers=headers(MEMBER_B),
+        )
+        audit = test_client.get(
+            f"/v1/tenants/{tenant_id}/audit-events?action=document.viewed",
+            headers=headers(ADMIN_A),
+        )
+
+    assert draft.status_code == 201
+    assert viewer_list.status_code == 200
+    assert viewer_list.json()[0]["latest_version"]["version_number"] == 1
+    assert viewer_list.json()[0]["latest_version"]["status"] == "published"
+    assert viewer_content.status_code == 200
+    assert viewer_content.json()["version"]["version_number"] == 1
+    assert viewer_content.json()["chunks"][0]["text"] == "Published security guidance."
+    assert [version["version_number"] for version in viewer_detail.json()["versions"]] == [1]
+    assert manager_content.status_code == 200
+    assert manager_content.json()["version"]["version_number"] == 2
+    assert manager_content.json()["chunks"][0]["text"] == "Unpublished replacement guidance."
+    assert ungranted_content.status_code == 404
+    assert audit.status_code == 200
+    view_events = audit.json()
+    assert {event["details"]["access_level"] for event in view_events} == {
+        "manager",
+        "viewer",
+    }
+    assert "Published security guidance." not in str(view_events)
+    assert "Unpublished replacement guidance." not in str(view_events)
 
 
 def test_local_sqlite_survives_api_restart(tmp_path: Path) -> None:

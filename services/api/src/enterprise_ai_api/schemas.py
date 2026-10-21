@@ -191,6 +191,12 @@ class DocumentChunkResponse(BaseModel):
     text: str
 
 
+class DocumentContentResponse(BaseModel):
+    document: DocumentResponse
+    version: DocumentVersionResponse
+    chunks: list[DocumentChunkResponse]
+
+
 class KnowledgeQuestionCreate(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
     space_ids: list[UUID] | None = Field(default=None, max_length=50)

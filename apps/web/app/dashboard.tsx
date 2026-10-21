@@ -7,6 +7,7 @@ import {
   Account,
   AuditEvent,
   Classification,
+  DocumentContent,
   DocumentSummary,
   KnowledgeAnswer,
   Membership,
@@ -21,6 +22,7 @@ import {
   createSpace,
   createTenant,
   getCurrentAccount,
+  getDocumentContent,
   getTenant,
   loginAccount,
   listDocuments,
@@ -81,6 +83,7 @@ const auditActionLabels: Record<string, string> = {
   "document.created": "上传文档",
   "document.version_uploaded": "上传文档版本",
   "document.published": "发布文档版本",
+  "document.viewed": "查看文档内容",
   "knowledge.question_answered": "知识问答",
   "authorization.denied": "访问被拒绝",
 };
@@ -157,6 +160,7 @@ export default function Dashboard() {
   const [spaceAccessDialog, setSpaceAccessDialog] = useState(false);
   const [uploadDialog, setUploadDialog] = useState(false);
   const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
+  const [documentReader, setDocumentReader] = useState<DocumentContent | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadWorkspace = useCallback(async (userId: string, organizationId: string) => {
@@ -293,6 +297,7 @@ export default function Dashboard() {
     setAnswers([]);
     setMembers([]);
     setAuditEvents([]);
+    setDocumentReader(null);
   }
 
   async function handleCreateTenant(event: FormEvent<HTMLFormElement>) {
@@ -461,6 +466,21 @@ export default function Dashboard() {
     }
   }
 
+  async function handleOpenDocument(summary: DocumentSummary) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      setDocumentReader(
+        await getDocumentContent(actorId, tenantId, summary.document.id),
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取文档");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleAskQuestion(question: string, spaceId?: string) {
     if (!tenantId) return;
     setBusy(true);
@@ -519,6 +539,7 @@ export default function Dashboard() {
     setAuditEvents([]);
     setActiveSpace(null);
     setMembers([]);
+    setDocumentReader(null);
     setView("overview");
   }
 
@@ -635,6 +656,7 @@ export default function Dashboard() {
               onUpload={() => { setVersionTarget(null); setUploadDialog(true); }}
               onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
               onPublish={handlePublish}
+              onOpen={handleOpenDocument}
               canManage={canManageActiveSpace}
               onManageAccess={() => setSpaceAccessDialog(true)}
             />
@@ -692,6 +714,9 @@ export default function Dashboard() {
           <div className="dialog-actions"><button type="button" onClick={() => { setUploadDialog(false); setVersionTarget(null); }}>取消</button><button className="primary-button" disabled={busy} type="submit"><Icon name="upload" />{busy ? "解析中…" : "上传并解析"}</button></div>
         </form>
       </Dialog>}
+      {documentReader && (
+        <DocumentReader content={documentReader} onClose={() => setDocumentReader(null)} />
+      )}
     </main>
   );
 }
@@ -912,13 +937,18 @@ function SpacesView({ spaces, documentsBySpace, onCreate, onOpen }: { spaces: Sp
   </>;
 }
 
-function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onManageAccess }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onManageAccess: () => void }) {
+function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onOpen, onManageAccess }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onOpen: (document: DocumentSummary) => void; onManageAccess: () => void }) {
   const statusLabels = { ready: "待发布", published: "已发布", superseded: "已替代", failed: "解析失败" };
   return <>
     <button className="back-button" onClick={onBack}><Icon name="back" />返回知识空间</button>
     <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>只有获得该空间授权的成员可以读取资料和参与检索。</p></div><div className="heading-actions">{canManage && <button className="secondary-button" onClick={onManageAccess}><Icon name="shield" />管理访问</button>}{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button>}</div></div>
-    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><div><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></div><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions">{canManage && item.latest_version.status === "ready" && <button disabled={busy} onClick={() => onPublish(item)}>发布</button>}{canManage && <button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button>}{!canManage && <span>只读</span>}</div></article>)}</section>}
+    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有已发布资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><button className="document-open" disabled={busy} onClick={() => onOpen(item)}><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></button><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions"><button className="view-action" disabled={busy} onClick={() => onOpen(item)}>查看</button>{canManage && item.latest_version.status === "ready" && <button className="publish-action" disabled={busy} onClick={() => onPublish(item)}>发布</button>}{canManage && <button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button>}{!canManage && <span>只读</span>}</div></article>)}</section>}
   </>;
+}
+
+function DocumentReader({ content, onClose }: { content: DocumentContent; onClose: () => void }) {
+  const statusLabel = content.version.status === "published" ? "已发布版本" : content.version.status === "ready" ? "待发布预览" : content.version.status === "superseded" ? "已替代版本" : "解析失败";
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section aria-modal="true" className="dialog document-reader" role="dialog"><button aria-label="关闭文档" className="dialog-close" onClick={onClose}>×</button><p className="kicker">安全文档阅读器</p><h2>{content.document.title}</h2><div className="reader-meta"><span>{content.version.filename}</span><span>v{content.version.version_number}</span><span>{statusLabel}</span><span>{formatBytes(content.version.byte_size)}</span></div><div className="reader-content">{content.chunks.length === 0 ? <div className="reader-empty"><Icon name="file" /><p>这个版本没有可显示的解析内容。</p></div> : content.chunks.map((chunk) => <article key={chunk.id}><small>{formatLocator(chunk.locator)}</small><p>{chunk.text}</p></article>)}</div><footer><Icon name="shield" />内容已通过企业、空间和版本权限校验；本次查看已写入审计日志。</footer></section></div>;
 }
 
 function MembersView({ members, actorId, canManage, onAdd }: { members: Membership[]; actorId: string; canManage: boolean; onAdd: () => void }) {

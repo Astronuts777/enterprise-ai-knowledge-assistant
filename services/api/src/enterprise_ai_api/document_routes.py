@@ -28,6 +28,7 @@ from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, S
 from enterprise_ai_api.object_storage import ObjectStorage, ObjectStorageError
 from enterprise_ai_api.schemas import (
     DocumentChunkResponse,
+    DocumentContentResponse,
     DocumentDetail,
     DocumentSummary,
     DocumentUploadResponse,
@@ -37,6 +38,7 @@ from enterprise_ai_api.tenancy import (
     CurrentUserId,
     authorize_space_access,
     authorize_tenant_action,
+    can_manage_space,
 )
 from enterprise_ai_core.security import Action
 
@@ -423,16 +425,98 @@ def list_documents(
         .order_by(Document.created_at.desc(), Document.id)
     )
     summaries: list[DocumentSummary] = []
+    can_manage = can_manage_space(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+    )
     for document in documents:
+        version_statement = select(DocumentVersion).where(
+            DocumentVersion.document_id == document.id
+        )
+        if not can_manage:
+            version_statement = version_statement.where(
+                DocumentVersion.status == "published"
+            )
         latest = session.scalar(
-            select(DocumentVersion)
-            .where(DocumentVersion.document_id == document.id)
-            .order_by(DocumentVersion.version_number.desc())
-            .limit(1)
+            version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
         )
         if latest is not None:
             summaries.append(DocumentSummary(document=document, latest_version=latest))
     return summaries
+
+
+@router.get(
+    "/tenants/{tenant_id}/documents/{document_id}/content",
+    response_model=DocumentContentResponse,
+)
+def read_document_content(
+    tenant_id: UUID,
+    document_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> DocumentContentResponse:
+    """Return parsed content only after tenant, space, and publication checks."""
+
+    authorize_tenant_action(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.READ_KNOWLEDGE,
+    )
+    document = _document_or_404(
+        session, tenant_id, user_id, document_id, manage=False
+    )
+    can_manage = can_manage_space(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=document.space_id,
+    )
+    version_statement = select(DocumentVersion).where(
+        DocumentVersion.document_id == document.id
+    )
+    if not can_manage:
+        version_statement = version_statement.where(
+            DocumentVersion.status == "published"
+        )
+    version = session.scalar(
+        version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
+    )
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    chunks = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_version_id == version.id)
+            .order_by(DocumentChunk.position)
+        )
+    )
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="document.viewed",
+        resource_type="document",
+        resource_id=document.id,
+        details={
+            "space_id": str(document.space_id),
+            "version_number": version.version_number,
+            "version_status": version.status,
+            "access_level": "manager" if can_manage else "viewer",
+        },
+    )
+    response = DocumentContentResponse(
+        document=document,
+        version=version,
+        chunks=chunks,
+    )
+    session.commit()
+    return response
 
 
 @router.get("/tenants/{tenant_id}/documents/{document_id}", response_model=DocumentDetail)
@@ -451,11 +535,22 @@ def get_document(
     document = _document_or_404(
         session, tenant_id, user_id, document_id, manage=False
     )
+    can_manage = can_manage_space(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=document.space_id,
+    )
+    version_statement = select(DocumentVersion).where(
+        DocumentVersion.document_id == document.id
+    )
+    if not can_manage:
+        version_statement = version_statement.where(
+            DocumentVersion.status == "published"
+        )
     versions = list(
         session.scalars(
-            select(DocumentVersion)
-            .where(DocumentVersion.document_id == document.id)
-            .order_by(DocumentVersion.version_number.desc())
+            version_statement.order_by(DocumentVersion.version_number.desc())
         )
     )
     return DocumentDetail(document=document, versions=versions)

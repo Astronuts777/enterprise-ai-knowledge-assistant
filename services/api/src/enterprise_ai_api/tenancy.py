@@ -248,14 +248,15 @@ def authorize_space_access(
 def can_manage_space(
     session: Session, *, tenant_id: UUID, user_id: UUID, space_id: UUID
 ) -> bool:
-    try:
-        authorize_space_access(
-            session,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            space_id=space_id,
-            manage=True,
-        )
-    except HTTPException:
+    """Check management access without writing a denial event for UI capability checks."""
+
+    space = session.get(Space, space_id)
+    if space is None or space.tenant_id != tenant_id:
         return False
-    return True
+    membership = tenant_membership(session, tenant_id, user_id)
+    if membership is None:
+        return False
+    if membership.role == Role.ENTERPRISE_ADMIN.value:
+        return True
+    grant = session.get(SpaceMembership, (tenant_id, space_id, user_id))
+    return grant is not None and grant.role == "manager"

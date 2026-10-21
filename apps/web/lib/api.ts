@@ -85,6 +85,20 @@ export type DocumentUpload = {
   version: DocumentVersion;
 };
 
+export type DocumentChunk = {
+  id: string;
+  document_version_id: string;
+  position: number;
+  locator: string;
+  text: string;
+};
+
+export type DocumentContent = {
+  document: KnowledgeDocument;
+  version: DocumentVersion;
+  chunks: DocumentChunk[];
+};
+
 export type AnswerStatus = "grounded" | "insufficient_evidence";
 
 export type AnswerCitation = {
@@ -367,6 +381,17 @@ export function listDocuments(
 ): Promise<DocumentSummary[]> {
   return request<DocumentSummary[]>(
     `/v1/tenants/${tenantId}/spaces/${spaceId}/documents`,
+    actorId,
+  );
+}
+
+export function getDocumentContent(
+  actorId: string,
+  tenantId: string,
+  documentId: string,
+): Promise<DocumentContent> {
+  return request<DocumentContent>(
+    `/v1/tenants/${tenantId}/documents/${documentId}/content`,
     actorId,
   );
 }

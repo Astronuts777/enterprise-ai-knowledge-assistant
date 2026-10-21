@@ -423,8 +423,11 @@ button { cursor: pointer; }
 .document-table-head, .document-row { align-items: center; display: grid; grid-template-columns: minmax(280px, 2fr) 0.45fr 0.6fr 0.75fr 0.9fr; padding: 0 1.3rem; }
 .document-table-head { background: #f0f3f0; color: #7c8b85; font-size: 0.62rem; font-weight: 800; height: 42px; text-transform: uppercase; }
 .document-row { border-top: 1px solid #edf0ed; min-height: 84px; }
-.document-row > div:first-child { align-items: center; display: flex; gap: 0.8rem; min-width: 0; }
-.document-row > div:first-child > i { align-items: center; background: #edf3e8; border-radius: 0.55rem; color: #55705e; display: flex; flex: 0 0 2.4rem; height: 2.7rem; justify-content: center; }
+.document-open { align-items: center; background: transparent; border: 0; color: inherit; display: flex; gap: 0.8rem; min-width: 0; padding: 0; text-align: left; }
+.document-open:disabled { cursor: wait; }
+.document-open > i { align-items: center; background: #edf3e8; border-radius: 0.55rem; color: #55705e; display: flex; flex: 0 0 2.4rem; height: 2.7rem; justify-content: center; transition: background 150ms, color 150ms; }
+.document-open:hover > i, .document-open:focus-visible > i { background: var(--nav); color: var(--accent); }
+.document-open:focus-visible { border-radius: 0.35rem; outline: 2px solid #7ba06d; outline-offset: 4px; }
 .document-row p { display: grid; gap: 0.15rem; margin: 0; min-width: 0; }
 .document-row p b { font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-row p span, .document-row > span { color: var(--muted); font-size: 0.64rem; }
@@ -436,7 +439,7 @@ button { cursor: pointer; }
 .document-status.failed { background: #f8e7e4; color: #9b5247; }
 .document-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
 .document-actions button { background: white; border: 1px solid #d6ded9; border-radius: 0.45rem; color: #53665d; font-size: 0.62rem; font-weight: 750; padding: 0.45rem 0.55rem; }
-.document-actions button:first-child { background: var(--ink); border-color: var(--ink); color: white; }
+.document-actions .view-action { background: var(--ink); border-color: var(--ink); color: white; }
 .document-actions button:disabled { cursor: wait; opacity: 0.55; }
 
 /* Evidence assistant */
@@ -537,6 +540,17 @@ button { cursor: pointer; }
 .dialog-form select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #6e7b75 50%), linear-gradient(135deg, #6e7b75 50%, transparent 50%); background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-repeat: no-repeat; background-size: 5px 5px, 5px 5px; }
 .dialog-actions { border-top: 1px solid #edf0ed; display: flex; gap: 0.65rem; justify-content: flex-end; margin-top: 1.7rem; padding-top: 1.2rem; }
 .dialog-actions > button:not(.primary-button) { background: white; border: 1px solid #d7dfda; border-radius: 0.6rem; color: #617169; font-size: 0.78rem; padding: 0.75rem 1rem; }
+.document-reader { display: flex; flex-direction: column; max-height: min(86vh, 900px); max-width: 920px; padding-bottom: 1.25rem; }
+.document-reader > h2 { padding-right: 2rem; }
+.reader-meta { align-items: center; border-bottom: 1px solid #e8ece9; color: var(--muted); display: flex; flex-wrap: wrap; font-size: 0.66rem; gap: 0.55rem; margin-top: 0.7rem; padding-bottom: 1rem; }
+.reader-meta span { background: #f1f4f1; border-radius: 2rem; padding: 0.35rem 0.6rem; }
+.reader-content { display: grid; gap: 0.8rem; margin: 1rem -0.35rem 0; overflow-y: auto; padding: 0 0.35rem 1rem; }
+.reader-content article { background: #f8faf7; border: 1px solid #e5eae6; border-radius: 0.65rem; padding: 1rem 1.1rem; }
+.reader-content article small { color: #71827a; display: block; font-size: 0.6rem; font-weight: 800; margin-bottom: 0.55rem; }
+.reader-content article p { color: #283a32; font-size: 0.78rem; line-height: 1.85; margin: 0; white-space: pre-wrap; }
+.reader-empty { align-items: center; color: var(--muted); display: flex; flex-direction: column; gap: 0.6rem; justify-content: center; min-height: 240px; }
+.document-reader > footer { align-items: center; border-top: 1px solid #e8ece9; color: #71827a; display: flex; font-size: 0.62rem; gap: 0.45rem; padding-top: 1rem; }
+.document-reader > footer .icon { color: #5d7b65; }
 .input-action { display: flex; gap: 0.5rem; }
 .input-action button { background: #eef3ed; border: 0; border-radius: 0.6rem; color: #526c5d; flex: 0 0 auto; font-size: 0.65rem; font-weight: 750; padding: 0 0.7rem; }
 .file-input { cursor: pointer; padding: 0.7rem !important; }
