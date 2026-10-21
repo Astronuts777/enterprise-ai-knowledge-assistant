@@ -51,10 +51,44 @@ class AccountLogin(BaseModel):
 
 
 class AccountResponse(BaseModel):
+    mfa_required: Literal[False] = False
     user_id: UUID
     email: str
     tenant_id: UUID | None
     email_verified: bool
+    mfa_enabled: bool
+
+
+class MfaChallengeResponse(BaseModel):
+    mfa_required: Literal[True] = True
+    challenge_token: str
+
+
+class MfaSetupRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+
+
+class MfaSetupResponse(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=32)
+
+
+class MfaConfirmResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class MfaLoginRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=200)
+    code: str = Field(min_length=6, max_length=32)
+
+
+class MfaDisableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=6, max_length=32)
 
 
 class AuthSessionResponse(BaseModel):

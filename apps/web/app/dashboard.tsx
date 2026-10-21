@@ -19,12 +19,15 @@ import {
   Tenant,
   acceptInvitation,
   askKnowledgeQuestion,
+  completeMfaLogin,
+  confirmMfaSetup,
   createInvitation,
   createSpace,
   createTenant,
   getCurrentAccount,
   getDocumentContent,
   getTenant,
+  disableMfa,
   loginAccount,
   listDocuments,
   listAuditEvents,
@@ -46,6 +49,7 @@ import {
   logoutAccount,
   saveMember,
   saveSpaceMember,
+  startMfaSetup,
   uploadDocument,
   uploadDocumentVersion,
   verifyEmail,
@@ -77,6 +81,9 @@ const auditActionLabels: Record<string, string> = {
   "account.session_revoked": "撤销账号会话",
   "account.sessions_revoked": "退出其他设备",
   "account.sessions_revoked_by_admin": "管理员强制下线",
+  "account.mfa_setup_started": "开始设置双重验证",
+  "account.mfa_enabled": "启用双重验证",
+  "account.mfa_disabled": "关闭双重验证",
   "account.email_verified": "邮箱验证",
   "account.verification_requested": "请求验证邮件",
   "account.password_reset_requested": "请求密码重置",
@@ -149,6 +156,7 @@ function formatLocator(value: string): string {
 export default function Dashboard() {
   const [actorId, setActorId] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
+  const [mfaEnabled, setMfaEnabled] = useState(false);
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
@@ -170,6 +178,9 @@ export default function Dashboard() {
   const [uploadDialog, setUploadDialog] = useState(false);
   const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
   const [documentReader, setDocumentReader] = useState<DocumentContent | null>(null);
+  const [mfaDialog, setMfaDialog] = useState<"enable" | "confirm" | "recovery" | "disable" | null>(null);
+  const [mfaSetup, setMfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadWorkspace = useCallback(async (userId: string, organizationId: string) => {
@@ -221,6 +232,7 @@ export default function Dashboard() {
           if (cancelled) return;
           setActorId(account.user_id);
           setAccountEmail(account.email);
+          setMfaEnabled(account.mfa_enabled);
           setTenantId(account.tenant_id);
           if (account.tenant_id) {
             window.localStorage.setItem(TENANT_KEY, account.tenant_id);
@@ -268,6 +280,7 @@ export default function Dashboard() {
   const finishAccountSignIn = useCallback(async (account: Account) => {
     setActorId(account.user_id);
     setAccountEmail(account.email);
+    setMfaEnabled(account.mfa_enabled);
     setTenantId(account.tenant_id);
     if (account.tenant_id) {
       window.localStorage.setItem(TENANT_KEY, account.tenant_id);
@@ -299,6 +312,7 @@ export default function Dashboard() {
     window.localStorage.removeItem(TENANT_KEY);
     setActorId("");
     setAccountEmail("");
+    setMfaEnabled(false);
     setTenantId(null);
     setTenant(null);
     setSpaces([]);
@@ -585,6 +599,62 @@ export default function Dashboard() {
     }
   }
 
+  async function handleStartMfa(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      setMfaSetup(await startMfaSetup(String(form.get("password") ?? "")));
+      setMfaDialog("confirm");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法开始双重验证设置");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleConfirmMfa(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await confirmMfaSetup(String(form.get("code") ?? ""));
+      setRecoveryCodes(result.recovery_codes);
+      setMfaEnabled(true);
+      setMfaDialog("recovery");
+      setNotice("双重验证已启用");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "验证码无效");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDisableMfa(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      const account = await disableMfa(
+        String(form.get("password") ?? ""),
+        String(form.get("code") ?? ""),
+      );
+      setMfaEnabled(account.mfa_enabled);
+      setMfaDialog(null);
+      setMfaSetup(null);
+      setRecoveryCodes([]);
+      setAccountSessions(await listAccountSessions());
+      setNotice("双重验证已关闭，其他设备的会话已撤销");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法关闭双重验证");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleRevokeMemberSessions(userId: string) {
     if (!tenantId) return;
     setBusy(true);
@@ -739,7 +809,15 @@ export default function Dashboard() {
             <AuditView events={auditEvents} />
           )}
           {view === "settings" && ACCOUNT_MODE && (
-            <AccountSecurityView sessions={accountSessions} busy={busy} onRevoke={handleRevokeSession} onRevokeOthers={handleRevokeOtherSessions} />
+            <AccountSecurityView
+              sessions={accountSessions}
+              busy={busy}
+              mfaEnabled={mfaEnabled}
+              onEnableMfa={() => setMfaDialog("enable")}
+              onDisableMfa={() => setMfaDialog("disable")}
+              onRevoke={handleRevokeSession}
+              onRevokeOthers={handleRevokeOtherSessions}
+            />
           )}
           <footer className="workspace-footer">企业 ID {shortId(tenant.id)}<button onClick={ACCOUNT_MODE ? handleLogout : resetDemo}>{ACCOUNT_MODE ? "安全退出" : "切换演示企业"}</button></footer>
         </div>
@@ -788,6 +866,31 @@ export default function Dashboard() {
           <div className="dialog-actions"><button type="button" onClick={() => { setUploadDialog(false); setVersionTarget(null); }}>取消</button><button className="primary-button" disabled={busy} type="submit"><Icon name="upload" />{busy ? "解析中…" : "上传并解析"}</button></div>
         </form>
       </Dialog>}
+      {mfaDialog === "enable" && <Dialog title="启用双重验证" description="先确认账号密码，再绑定你的身份验证器。" onClose={() => setMfaDialog(null)}>
+        <form className="dialog-form" onSubmit={handleStartMfa}>
+          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">继续</button></div>
+        </form>
+      </Dialog>}
+      {mfaDialog === "confirm" && mfaSetup && <Dialog title="绑定身份验证器" description="在身份验证器中手动输入密钥，然后填写生成的 6 位验证码。" onClose={() => setMfaDialog(null)}>
+        <form className="dialog-form" onSubmit={handleConfirmMfa}>
+          <label>设置密钥<input className="mfa-secret" readOnly value={mfaSetup.secret} /></label>
+          <a className="text-button" href={mfaSetup.otpauth_uri}>在支持的身份验证器中打开</a>
+          <label>6 位验证码<input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} pattern="[0-9]{6}" required /></label>
+          <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">验证并启用</button></div>
+        </form>
+      </Dialog>}
+      {mfaDialog === "recovery" && <Dialog title="保存恢复码" description="每个恢复码只能使用一次。请保存到企业密码管理器，关闭后不会再次显示。" onClose={() => setMfaDialog(null)}>
+        <div className="recovery-code-grid">{recoveryCodes.map((code) => <code key={code}>{code}</code>)}</div>
+        <div className="dialog-actions"><button className="primary-button" type="button" onClick={() => { setMfaDialog(null); setMfaSetup(null); setRecoveryCodes([]); }}>我已安全保存</button></div>
+      </Dialog>}
+      {mfaDialog === "disable" && <Dialog title="关闭双重验证" description="需要同时验证当前密码和身份验证器验证码（也可使用恢复码）。其他设备会被强制退出。" onClose={() => setMfaDialog(null)}>
+        <form className="dialog-form" onSubmit={handleDisableMfa}>
+          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          <label>验证码或恢复码<input name="code" autoComplete="one-time-code" minLength={6} maxLength={32} required /></label>
+          <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="danger-button" disabled={busy} type="submit">确认关闭</button></div>
+        </form>
+      </Dialog>}
       {documentReader && (
         <DocumentReader content={documentReader} onClose={() => setDocumentReader(null)} />
       )}
@@ -796,7 +899,7 @@ export default function Dashboard() {
 }
 
 function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: boolean) => void; onReady: (account: Account) => Promise<void> }) {
-  type AuthMode = "login" | "create" | "join" | "forgot" | "verify" | "reset";
+  type AuthMode = "login" | "create" | "join" | "forgot" | "verify" | "reset" | "mfa";
   const [parameters] = useState(() => new URLSearchParams(window.location.search));
   const [invitation] = useState(() => parameters.get("invite") ?? "");
   const [invitationTenant] = useState(() => parameters.get("tenant") ?? "");
@@ -807,6 +910,8 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
     return invitation ? "join" : "login";
   });
   const [pendingEmail, setPendingEmail] = useState("");
+  const [mfaChallenge, setMfaChallenge] = useState("");
+  const [pendingInvitation, setPendingInvitation] = useState<{ tenantId: string; token: string } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -820,7 +925,13 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
     setMessage(null);
     try {
       if (mode === "login") {
-        await onReady(await loginAccount(email, password));
+        const result = await loginAccount(email, password);
+        if (result.mfa_required) {
+          setMfaChallenge(result.challenge_token);
+          setMode("mfa");
+        } else {
+          await onReady(result);
+        }
       } else if (mode === "create") {
         const account = await registerAccount({
           email,
@@ -839,7 +950,17 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
           account = await registerAccount({ email, password });
         } catch (registrationError) {
           if (!(registrationError instanceof ApiError) || registrationError.status !== 409) throw registrationError;
-          account = await loginAccount(email, password);
+          const result = await loginAccount(email, password);
+          if (result.mfa_required) {
+            setMfaChallenge(result.challenge_token);
+            setPendingInvitation({
+              tenantId: String(form.get("tenant_id") ?? "").trim(),
+              token: String(form.get("invite_token") ?? "").trim(),
+            });
+            setMode("mfa");
+            return;
+          }
+          account = result;
         }
         if (!account.email_verified) {
           setPendingEmail(email);
@@ -865,10 +986,30 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
           await onReady(account);
         }
       } else if (mode === "reset") {
-        await onReady(await resetPassword(
+        const result = await resetPassword(
           String(form.get("token") ?? linkToken).trim(),
           password,
-        ));
+        );
+        if (result.mfa_required) {
+          setMfaChallenge(result.challenge_token);
+          setMode("mfa");
+        } else {
+          await onReady(result);
+        }
+      } else if (mode === "mfa") {
+        const account = await completeMfaLogin(
+          mfaChallenge,
+          String(form.get("code") ?? "").trim(),
+        );
+        if (pendingInvitation) {
+          const accepted = await acceptInvitation(
+            pendingInvitation.tenantId,
+            pendingInvitation.token,
+          );
+          await onReady({ ...accepted, email: account.email });
+        } else {
+          await onReady(account);
+        }
       }
     } catch (submitError) {
       if (mode === "login" && submitError instanceof ApiError && submitError.status === 403) {
@@ -897,8 +1038,8 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
     }
   }
 
-  const title = mode === "login" ? "欢迎回来" : mode === "create" ? "创建企业账号" : mode === "join" ? "加入企业" : mode === "forgot" ? "找回密码" : mode === "verify" ? "验证邮箱" : "设置新密码";
-  const description = mode === "login" ? "使用已授权的企业账号进入。" : mode === "create" ? "创建者将成为首位企业管理员。" : mode === "join" ? "邀请邮箱必须与注册邮箱一致。" : mode === "forgot" ? "我们会向账号邮箱发送一个 30 分钟有效的链接。" : mode === "verify" ? "验证完成前不会建立企业访问会话。" : "重置成功后，所有旧会话都会失效。";
+  const title = mode === "login" ? "欢迎回来" : mode === "create" ? "创建企业账号" : mode === "join" ? "加入企业" : mode === "forgot" ? "找回密码" : mode === "verify" ? "验证邮箱" : mode === "mfa" ? "完成双重验证" : "设置新密码";
+  const description = mode === "login" ? "使用已授权的企业账号进入。" : mode === "create" ? "创建者将成为首位企业管理员。" : mode === "join" ? "邀请邮箱必须与注册邮箱一致。" : mode === "forgot" ? "我们会向账号邮箱发送一个 30 分钟有效的链接。" : mode === "verify" ? "验证完成前不会建立企业访问会话。" : mode === "mfa" ? "输入身份验证器生成的 6 位验证码，或使用一个恢复码。" : "重置成功后，所有旧会话都会失效。";
 
   return <main className="onboarding auth-page">
     <section className="onboarding-story">
@@ -921,10 +1062,11 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
         {mode === "join" && <><label>企业 ID<input name="tenant_id" defaultValue={invitationTenant} required /></label><label>邀请令牌<input name="invite_token" defaultValue={invitation} required /></label></>}
         {mode === "verify" && <label>验证令牌<input name="token" defaultValue={linkToken} required /></label>}
         {mode === "reset" && <label>重置令牌<input name="token" defaultValue={linkToken} required /></label>}
-        <button className="primary-button wide" disabled={busy} type="submit">{busy ? "正在处理…" : mode === "login" ? "安全登录" : mode === "create" ? "创建账号" : mode === "join" ? "验证邀请并加入" : mode === "forgot" ? "发送重置邮件" : mode === "verify" ? "完成邮箱验证" : "保存新密码"}<Icon name="arrow" /></button>
+        {mode === "mfa" && <label>验证码或恢复码<input name="code" autoComplete="one-time-code" autoFocus minLength={6} maxLength={32} required /></label>}
+        <button className="primary-button wide" disabled={busy} type="submit">{busy ? "正在处理…" : mode === "login" ? "安全登录" : mode === "create" ? "创建账号" : mode === "join" ? "验证邀请并加入" : mode === "forgot" ? "发送重置邮件" : mode === "verify" ? "完成邮箱验证" : mode === "mfa" ? "验证并登录" : "保存新密码"}<Icon name="arrow" /></button>
         {mode === "login" && <button className="text-button" type="button" onClick={() => setMode("forgot")}>忘记密码？</button>}
         {mode === "verify" && pendingEmail && <button className="text-button" disabled={busy} type="button" onClick={resend}>重新发送验证邮件</button>}
-        {!["login", "create", "join"].includes(mode) && <button className="text-button" type="button" onClick={() => { setMode("login"); setError(null); setMessage(null); }}>返回登录</button>}
+        {!["login", "create", "join"].includes(mode) && <button className="text-button" type="button" onClick={() => { setMode("login"); setMfaChallenge(""); setPendingInvitation(null); setError(null); setMessage(null); }}>返回登录</button>}
         <p className="security-note"><Icon name="shield" />密码使用 scrypt 加盐哈希，系统不会保存明文密码。</p>
         {message && <p className="form-success">{message}</p>}
         {error && <p className="form-error">{error}</p>}
@@ -1031,10 +1173,14 @@ function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSession
   </>;
 }
 
-function AccountSecurityView({ sessions, busy, onRevoke, onRevokeOthers }: { sessions: AccountSession[]; busy: boolean; onRevoke: (session: AccountSession) => void; onRevokeOthers: () => void }) {
+function AccountSecurityView({ sessions, busy, mfaEnabled, onEnableMfa, onDisableMfa, onRevoke, onRevokeOthers }: { sessions: AccountSession[]; busy: boolean; mfaEnabled: boolean; onEnableMfa: () => void; onDisableMfa: () => void; onRevoke: (session: AccountSession) => void; onRevokeOthers: () => void }) {
   const otherSessionCount = sessions.filter((session) => !session.is_current).length;
   return <>
-    <div className="page-heading"><div><p className="kicker">账号安全</p><h1>登录设备与会话</h1><p>查看当前账号的有效登录会话，并立即撤销不认识的设备。</p></div><button className="secondary-button" disabled={busy || otherSessionCount === 0} onClick={onRevokeOthers}><Icon name="shield" />退出全部其他设备</button></div>
+    <div className="page-heading"><div><p className="kicker">账号安全</p><h1>身份与登录保护</h1><p>使用双重验证保护账号，并立即撤销不认识的设备。</p></div><button className="secondary-button" disabled={busy || otherSessionCount === 0} onClick={onRevokeOthers}><Icon name="shield" />退出全部其他设备</button></div>
+    <section className={`mfa-card ${mfaEnabled ? "enabled" : ""}`}>
+      <div><i><Icon name="shield" /></i><span><b>身份验证器双重验证</b><small>{mfaEnabled ? "已启用：登录需要密码和一次性验证码" : "建议启用：即使密码泄露也能阻止未授权登录"}</small></span></div>
+      <button className={mfaEnabled ? "secondary-button" : "primary-button"} disabled={busy} onClick={mfaEnabled ? onDisableMfa : onEnableMfa}>{mfaEnabled ? "关闭双重验证" : "立即启用"}</button>
+    </section>
     <section className="security-summary"><div><Icon name="shield" /><span><b>{sessions.length}</b><small>有效会话</small></span></div><p>系统只保留粗粒度浏览器和操作系统标签，不保存完整 User-Agent 或原始 IP 地址。会话最多持续 12 小时。</p></section>
     <section className="session-list">
       {sessions.map((session) => <article key={session.id}><div className="session-device"><i><Icon name="settings" /></i><span><b>{session.client_label}</b><small>{session.is_current ? "当前设备" : `登录于 ${formatAuditDate(session.created_at)}`}</small></span></div><div className="session-expiry"><small>有效期至</small><time dateTime={session.expires_at}>{formatAuditDate(session.expires_at)}</time></div>{session.is_current ? <span className="current-session"><i />正在使用</span> : <button disabled={busy} onClick={() => onRevoke(session)}>退出此设备</button>}</article>)}

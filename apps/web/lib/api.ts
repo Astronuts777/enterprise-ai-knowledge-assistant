@@ -138,10 +138,24 @@ export type BrowserSession = {
 };
 
 export type Account = {
+  mfa_required: false;
   user_id: string;
   email: string;
   tenant_id: string | null;
   email_verified: boolean;
+  mfa_enabled: boolean;
+};
+
+export type MfaChallenge = {
+  mfa_required: true;
+  challenge_token: string;
+};
+
+export type LoginResult = Account | MfaChallenge;
+
+export type MfaSetup = {
+  secret: string;
+  otpauth_uri: string;
 };
 
 export type AccountSession = {
@@ -225,10 +239,38 @@ export function registerAccount(input: {
   });
 }
 
-export function loginAccount(email: string, password: string): Promise<Account> {
-  return accountRequest<Account>("/v1/auth/login", {
+export function loginAccount(email: string, password: string): Promise<LoginResult> {
+  return accountRequest<LoginResult>("/v1/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
+  });
+}
+
+export function completeMfaLogin(challengeToken: string, code: string): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/mfa/login", {
+    method: "POST",
+    body: JSON.stringify({ challenge_token: challengeToken, code }),
+  });
+}
+
+export function startMfaSetup(password: string): Promise<MfaSetup> {
+  return accountRequest<MfaSetup>("/v1/auth/mfa/setup", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
+
+export function confirmMfaSetup(code: string): Promise<{ recovery_codes: string[] }> {
+  return accountRequest<{ recovery_codes: string[] }>("/v1/auth/mfa/confirm", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+export function disableMfa(password: string, code: string): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/mfa", {
+    method: "DELETE",
+    body: JSON.stringify({ password, code }),
   });
 }
 
@@ -283,8 +325,8 @@ export function requestPasswordReset(email: string): Promise<{ message: string }
   });
 }
 
-export function resetPassword(token: string, password: string): Promise<Account> {
-  return accountRequest<Account>("/v1/auth/password/reset", {
+export function resetPassword(token: string, password: string): Promise<LoginResult> {
+  return accountRequest<LoginResult>("/v1/auth/password/reset", {
     method: "POST",
     body: JSON.stringify({ token, password }),
   });

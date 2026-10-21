@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import time
 from urllib.parse import parse_qs, urlparse
 
 from alembic import command
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine
 from enterprise_ai_api.crypto import FILE_MAGIC, decrypt_bytes
 from enterprise_ai_api.email_delivery import MemoryEmailSender
 from enterprise_ai_api.main import create_app
+from enterprise_ai_api.mfa import TOTP_PERIOD_SECONDS, totp_code
 
 PASSWORD = "correct horse battery staple"
 
@@ -299,6 +301,97 @@ def test_login_is_rate_limited_after_repeated_failures() -> None:
     assert [response.status_code for response in failures[:5]] == [401] * 5
     assert failures[5].status_code == 429
     assert failures[5].headers["retry-after"] == "900"
+
+
+def test_totp_mfa_challenges_login_and_recovery_codes_are_one_time() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    with TestClient(app) as client:
+        account = register(client, "mfa@example.com", organization_name="Secure Acme")
+        wrong_password = client.post(
+            "/v1/auth/mfa/setup", json={"password": "incorrect password"}
+        )
+        setup = client.post("/v1/auth/mfa/setup", json={"password": PASSWORD})
+        secret = setup.json()["secret"]
+        current_counter = int(time()) // TOTP_PERIOD_SECONDS
+        confirmed = client.post(
+            "/v1/auth/mfa/confirm",
+            json={"code": totp_code(secret, current_counter)},
+        )
+        recovery_codes = confirmed.json()["recovery_codes"]
+
+        with app.state.engine.connect() as connection:
+            stored_secret = connection.exec_driver_sql(
+                "SELECT mfa_secret_ciphertext FROM users WHERE id = ?",
+                (account["user_id"].replace("-", ""),),
+            ).scalar_one()
+            stored_codes = connection.exec_driver_sql(
+                "SELECT code_hash FROM mfa_recovery_codes"
+            ).scalars().all()
+
+        client.post("/v1/auth/logout")
+        challenged = client.post(
+            "/v1/auth/login",
+            json={"email": "mfa@example.com", "password": PASSWORD},
+        )
+        before_second_factor = client.get("/v1/auth/me")
+        completed = client.post(
+            "/v1/auth/mfa/login",
+            json={
+                "challenge_token": challenged.json()["challenge_token"],
+                "code": totp_code(secret, current_counter + 1),
+            },
+        )
+
+        client.post("/v1/auth/logout")
+        replay_challenge = client.post(
+            "/v1/auth/login",
+            json={"email": "mfa@example.com", "password": PASSWORD},
+        )
+        replayed = client.post(
+            "/v1/auth/mfa/login",
+            json={
+                "challenge_token": replay_challenge.json()["challenge_token"],
+                "code": totp_code(secret, current_counter + 1),
+            },
+        )
+        recovered = client.post(
+            "/v1/auth/mfa/login",
+            json={
+                "challenge_token": replay_challenge.json()["challenge_token"],
+                "code": recovery_codes[0],
+            },
+        )
+
+        disabled = client.request(
+            "DELETE",
+            "/v1/auth/mfa",
+            json={"password": PASSWORD, "code": recovery_codes[1]},
+        )
+        client.post("/v1/auth/logout")
+        password_only = client.post(
+            "/v1/auth/login",
+            json={"email": "mfa@example.com", "password": PASSWORD},
+        )
+
+    assert wrong_password.status_code == 403
+    assert setup.status_code == 200
+    assert setup.json()["otpauth_uri"].startswith("otpauth://totp/")
+    assert confirmed.status_code == 200
+    assert len(recovery_codes) == 8
+    assert stored_secret.startswith("enc:v1:")
+    assert secret not in stored_secret
+    assert all(code.replace("-", "") not in stored_codes for code in recovery_codes)
+    assert challenged.status_code == 200
+    assert challenged.json()["mfa_required"] is True
+    assert before_second_factor.status_code == 401
+    assert completed.status_code == 200
+    assert completed.json()["mfa_enabled"] is True
+    assert replayed.status_code == 401
+    assert recovered.status_code == 200
+    assert disabled.status_code == 200
+    assert disabled.json()["mfa_enabled"] is False
+    assert password_only.status_code == 200
+    assert password_only.json()["mfa_required"] is False
 
 
 def test_document_content_is_encrypted_in_database_and_file_storage(tmp_path: Path) -> None:

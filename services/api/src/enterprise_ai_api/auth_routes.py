@@ -4,7 +4,7 @@ import re
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -22,12 +22,19 @@ from enterprise_ai_api.crypto import (
 )
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.email_delivery import EmailDeliveryError, EmailSender
+from enterprise_ai_api.mfa import (
+    new_recovery_codes,
+    new_totp_secret,
+    normalize_recovery_code,
+    verify_totp,
+)
 from enterprise_ai_api.models import (
     AccountToken,
     AuthAttempt,
     AuthSession,
     Invitation,
     Membership,
+    MfaRecoveryCode,
     Tenant,
     User,
 )
@@ -41,6 +48,13 @@ from enterprise_ai_api.schemas import (
     InvitationAccept,
     InvitationCreate,
     InvitationResponse,
+    MfaChallengeResponse,
+    MfaCodeRequest,
+    MfaConfirmResponse,
+    MfaDisableRequest,
+    MfaLoginRequest,
+    MfaSetupRequest,
+    MfaSetupResponse,
     PasswordResetConfirm,
     RevokedSessionsResponse,
     TokenRequest,
@@ -55,6 +69,7 @@ SESSION_LIFETIME = timedelta(hours=12)
 INVITATION_LIFETIME = timedelta(days=7)
 VERIFICATION_LIFETIME = timedelta(hours=24)
 PASSWORD_RESET_LIFETIME = timedelta(minutes=30)
+MFA_CHALLENGE_LIFETIME = timedelta(minutes=5)
 LOGIN_WINDOW = timedelta(minutes=15)
 MAX_LOGIN_FAILURES = 5
 MAX_NETWORK_LOGIN_FAILURES = 50
@@ -135,6 +150,7 @@ def _account_response(user: User) -> AccountResponse:
         email=user.email_ciphertext,
         tenant_id=user.default_tenant_id,
         email_verified=user.email_verified_at is not None,
+        mfa_enabled=user.mfa_enabled_at is not None,
     )
 
 
@@ -147,7 +163,12 @@ def _issue_account_token(session: Session, user_id: UUID, purpose: str) -> str:
         )
     )
     raw_token = new_token()
-    lifetime = VERIFICATION_LIFETIME if purpose == "email_verification" else PASSWORD_RESET_LIFETIME
+    lifetimes = {
+        "email_verification": VERIFICATION_LIFETIME,
+        "password_reset": PASSWORD_RESET_LIFETIME,
+        "mfa_login": MFA_CHALLENGE_LIFETIME,
+    }
+    lifetime = lifetimes[purpose]
     session.add(
         AccountToken(
             user_id=user_id,
@@ -175,6 +196,35 @@ def _valid_account_token(session: Session, raw_token: str, purpose: str) -> Acco
     if expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=status.HTTP_410_GONE, detail="Token has expired")
     return account_token
+
+
+def _recovery_code_hash(code: str) -> str:
+    return token_hash(f"mfa-recovery:{normalize_recovery_code(code)}")
+
+
+def _verify_user_mfa_code(
+    session: Session, user: User, code: str
+) -> tuple[str, int | None, MfaRecoveryCode | None] | None:
+    if user.mfa_secret_ciphertext is not None:
+        counter = verify_totp(
+            user.mfa_secret_ciphertext,
+            code,
+            last_counter=user.mfa_last_counter,
+        )
+        if counter is not None:
+            return "totp", counter, None
+    recovery_code = session.scalar(
+        select(MfaRecoveryCode)
+        .where(
+            MfaRecoveryCode.user_id == user.id,
+            MfaRecoveryCode.code_hash == _recovery_code_hash(code),
+            MfaRecoveryCode.used_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if recovery_code is not None:
+        return "recovery_code", None, recovery_code
+    return None
 
 
 def _send_verification_email(
@@ -330,13 +380,13 @@ def register_account(
     return _account_response(user)
 
 
-@router.post("/auth/login", response_model=AccountResponse)
+@router.post("/auth/login", response_model=AccountResponse | MfaChallengeResponse)
 def login_account(
     payload: AccountLogin,
     request: Request,
     response: Response,
     session: DatabaseSession,
-) -> AccountResponse:
+) -> AccountResponse | MfaChallengeResponse:
     if not request.app.state.account_auth:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     email_hash = blind_index(_normalize_email(payload.email))
@@ -383,6 +433,10 @@ def login_account(
             detail="Email verification required",
         )
     session.execute(delete(AuthAttempt).where(AuthAttempt.identity_hash == identity_hash))
+    if user.mfa_enabled_at is not None and user.mfa_secret_ciphertext is not None:
+        challenge_token = _issue_account_token(session, user.id, "mfa_login")
+        session.commit()
+        return MfaChallengeResponse(challenge_token=challenge_token)
     token = _new_session(session, user.id, request)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
@@ -396,6 +450,196 @@ def login_account(
         )
     session.commit()
     _set_session_cookie(request, response, token)
+    return _account_response(user)
+
+
+@router.post("/auth/mfa/login", response_model=AccountResponse)
+def complete_mfa_login(
+    payload: MfaLoginRequest,
+    request: Request,
+    response: Response,
+    session: DatabaseSession,
+) -> AccountResponse:
+    challenge = _valid_account_token(session, payload.challenge_token, "mfa_login")
+    user = session.get(User, challenge.user_id)
+    if (
+        user is None
+        or user.status != "active"
+        or user.mfa_enabled_at is None
+        or user.mfa_secret_ciphertext is None
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid challenge")
+    verified = _verify_user_mfa_code(session, user, payload.code)
+    if verified is None:
+        challenge.attempt_count += 1
+        if challenge.attempt_count >= 5:
+            challenge.consumed_at = datetime.now(UTC)
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code",
+        )
+
+    method, counter, recovery_code = verified
+    now = datetime.now(UTC)
+    challenge.consumed_at = now
+    if counter is not None:
+        user.mfa_last_counter = counter
+    if recovery_code is not None:
+        recovery_code.used_at = now
+    session_token = _new_session(session, user.id, request)
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.login",
+            resource_type="user",
+            resource_id=user.id,
+            details={"mfa": True, "method": method},
+        )
+    session.commit()
+    _set_session_cookie(request, response, session_token)
+    return _account_response(user)
+
+
+@router.post("/auth/mfa/setup", response_model=MfaSetupResponse)
+def start_mfa_setup(
+    payload: MfaSetupRequest,
+    request: Request,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> MfaSetupResponse:
+    user = session.get(User, user_id)
+    if user is None or user.password_hash is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    if not password_matches(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    if user.mfa_enabled_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is already enabled")
+    if user.email_ciphertext is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account is incomplete")
+
+    secret = new_totp_secret()
+    user.mfa_secret_ciphertext = secret
+    user.mfa_last_counter = None
+    session.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.mfa_setup_started",
+            resource_type="user",
+            resource_id=user.id,
+        )
+    session.commit()
+    label = quote(f"Enterprise AI:{user.email_ciphertext}", safe="")
+    query = urlencode(
+        {
+            "secret": secret,
+            "issuer": "Enterprise AI",
+            "algorithm": "SHA1",
+            "digits": "6",
+            "period": "30",
+        }
+    )
+    return MfaSetupResponse(secret=secret, otpauth_uri=f"otpauth://totp/{label}?{query}")
+
+
+@router.post("/auth/mfa/confirm", response_model=MfaConfirmResponse)
+def confirm_mfa_setup(
+    payload: MfaCodeRequest,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> MfaConfirmResponse:
+    user = session.get(User, user_id)
+    if user is None or user.mfa_secret_ciphertext is None or user.mfa_enabled_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No pending MFA setup")
+    counter = verify_totp(user.mfa_secret_ciphertext, payload.code)
+    if counter is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code",
+        )
+    now = datetime.now(UTC)
+    user.mfa_enabled_at = now
+    user.mfa_last_counter = counter
+    recovery_codes = new_recovery_codes()
+    session.add_all(
+        [
+            MfaRecoveryCode(user_id=user.id, code_hash=_recovery_code_hash(code))
+            for code in recovery_codes
+        ]
+    )
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.mfa_enabled",
+            resource_type="user",
+            resource_id=user.id,
+        )
+    session.commit()
+    return MfaConfirmResponse(recovery_codes=recovery_codes)
+
+
+@router.delete("/auth/mfa", response_model=AccountResponse)
+def disable_mfa(
+    payload: MfaDisableRequest,
+    request: Request,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> AccountResponse:
+    user = session.get(User, user_id)
+    if (
+        user is None
+        or user.password_hash is None
+        or user.mfa_enabled_at is None
+        or user.mfa_secret_ciphertext is None
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
+    if not password_matches(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    verified = _verify_user_mfa_code(session, user, payload.code)
+    if verified is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code",
+        )
+    _, _, recovery_code = verified
+    if recovery_code is not None:
+        recovery_code.used_at = datetime.now(UTC)
+    user.mfa_secret_ciphertext = None
+    user.mfa_enabled_at = None
+    user.mfa_last_counter = None
+    session.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    current_hash = token_hash(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    session.execute(
+        delete(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.token_hash != current_hash,
+        )
+    )
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.mfa_disabled",
+            resource_type="user",
+            resource_id=user.id,
+            details={"other_sessions_revoked": True},
+        )
+    session.commit()
     return _account_response(user)
 
 
@@ -511,13 +755,13 @@ def forgot_password(
     return GenericMessage(message="If the account exists, a reset email was sent")
 
 
-@router.post("/auth/password/reset", response_model=AccountResponse)
+@router.post("/auth/password/reset", response_model=AccountResponse | MfaChallengeResponse)
 def reset_password(
     payload: PasswordResetConfirm,
     request: Request,
     response: Response,
     session: DatabaseSession,
-) -> AccountResponse:
+) -> AccountResponse | MfaChallengeResponse:
     account_token = _valid_account_token(session, payload.token, "password_reset")
     user = session.get(User, account_token.user_id)
     if user is None or user.status != "active":
@@ -527,7 +771,12 @@ def reset_password(
     user.email_verified_at = user.email_verified_at or now
     account_token.consumed_at = now
     session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
-    session_token = _new_session(session, user.id, request)
+    mfa_challenge = (
+        _issue_account_token(session, user.id, "mfa_login")
+        if user.mfa_enabled_at is not None and user.mfa_secret_ciphertext is not None
+        else None
+    )
+    session_token = None if mfa_challenge else _new_session(session, user.id, request)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         record_audit_event(
@@ -539,7 +788,11 @@ def reset_password(
             resource_id=user.id,
         )
     session.commit()
-    _set_session_cookie(request, response, session_token)
+    if mfa_challenge:
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        return MfaChallengeResponse(challenge_token=mfa_challenge)
+    if session_token:
+        _set_session_cookie(request, response, session_token)
     return _account_response(user)
 
 

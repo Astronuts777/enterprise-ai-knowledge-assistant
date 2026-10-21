@@ -45,6 +45,9 @@ class User(Base):
     )
     status: Mapped[str] = mapped_column(String(32), default="active")
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mfa_secret_ciphertext: Mapped[str | None] = mapped_column(EncryptedText())
+    mfa_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mfa_last_counter: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -65,7 +68,7 @@ class AccountToken(Base):
     __tablename__ = "account_tokens"
     __table_args__ = (
         CheckConstraint(
-            "purpose IN ('email_verification', 'password_reset')",
+            "purpose IN ('email_verification', 'password_reset', 'mfa_login')",
             name="ck_account_tokens_purpose",
         ),
     )
@@ -78,6 +81,19 @@ class AccountToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MfaRecoveryCode(Base):
+    __tablename__ = "mfa_recovery_codes"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

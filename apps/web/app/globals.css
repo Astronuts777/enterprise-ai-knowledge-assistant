@@ -518,6 +518,18 @@ button { cursor: pointer; }
 .member-session-action button { background: white; border: 1px solid #d6ded9; border-radius: 0.45rem; color: #8a5049; font-size: 0.62rem; font-weight: 750; padding: 0.45rem 0.55rem; }
 .member-session-action button:disabled { cursor: wait; opacity: 0.55; }
 
+.mfa-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 0.85rem; display: flex; justify-content: space-between; margin-bottom: 1rem; padding: 1.1rem 1.3rem; }
+.mfa-card.enabled { background: #f4f8f1; border-color: #cbdcc1; }
+.mfa-card > div { align-items: center; display: flex; gap: 0.8rem; }
+.mfa-card > div > i { align-items: center; background: #edf3e8; border-radius: 0.6rem; color: #55705e; display: flex; height: 2.8rem; justify-content: center; width: 2.8rem; }
+.mfa-card > div > span { display: grid; gap: 0.25rem; }
+.mfa-card b { font-size: 0.76rem; }
+.mfa-card small { color: var(--muted); font-size: 0.62rem; }
+.mfa-secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.08em; }
+.recovery-code-grid { background: #f4f6f3; border: 1px solid var(--line); border-radius: 0.65rem; display: grid; gap: 0.55rem; grid-template-columns: repeat(2, 1fr); margin-top: 1rem; padding: 1rem; }
+.recovery-code-grid code { color: #263b31; font-size: 0.8rem; font-weight: 750; letter-spacing: 0.08em; text-align: center; }
+.dialog-actions > .danger-button { border-color: #d9b7b2; color: #984f47; font-weight: 750; }
+
 .security-summary { align-items: center; background: var(--nav); border-radius: 0.85rem; color: white; display: flex; justify-content: space-between; margin-bottom: 1rem; padding: 1.2rem 1.35rem; }
 .security-summary > div { align-items: center; display: flex; gap: 0.8rem; }
 .security-summary > div > .icon { color: var(--accent); height: 1.5rem; width: 1.5rem; }
@@ -619,6 +631,8 @@ button { cursor: pointer; }
   .member-row > span:nth-of-type(2), .member-row > span:nth-of-type(3) { display: none; }
   .member-session-action { grid-column: 2; }
   .security-summary { align-items: flex-start; flex-direction: column; gap: 0.8rem; }
+  .mfa-card { align-items: flex-start; flex-direction: column; gap: 1rem; }
+  .recovery-code-grid { grid-template-columns: 1fr; }
   .session-list article { grid-template-columns: 1fr auto; padding: 1rem; }
   .session-expiry { display: none; }
   .document-table-head { display: none; }
