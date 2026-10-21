@@ -15,24 +15,27 @@
 
 ## 当前阶段
 
-项目处于产品发现阶段。当前正在确定首批目标组织、核心角色和跨行业高价值使用场景，尚未进入技术选型和功能开发。
+项目处于 MVP 定义与架构设计阶段。首个跨行业工作流、P0 范围、用户故事和系统架构已经形成；初始技术栈仍需人工确认，尚未进入功能开发。
 
 ## 文档
 
 - [项目章程](docs/00-project-charter.md)
 - [产品定位](docs/01-product-positioning.md)
+- [MVP 范围与验收标准](docs/02-mvp-scope.md)
+- [用户故事与核心流程](docs/03-user-stories.md)
+- [MVP 系统架构](docs/04-system-architecture.md)
 - [AI 协作记录](docs/ai-development-log.md)
-- [架构决策记录](docs/decisions/ADR-0001-horizontal-product-strategy.md)
+- [横向产品策略决策](docs/decisions/ADR-0001-horizontal-product-strategy.md)
+- [初始技术栈提案](docs/decisions/ADR-0002-initial-technology-stack.md)
 
 ## 计划阶段
 
-1. 用户与场景定义
-2. 用户调研与竞品分析
-3. PRD、指标与风险边界
-4. MVP 范围
-5. 系统架构与数据模型
-6. 前后端实现
-7. RAG 与质量评测
-8. 部署、安全、监控与成本
-9. 项目案例报告
+1. 确认初始技术栈
+2. 创建前端、API、Worker 和本地依赖骨架
+3. 实现企业、成员、知识空间和权限基础
+4. 完成文档上传、解析、版本和发布流程
+5. 完成权限感知检索、引用问答和拒答
+6. 完成决策证据包、审批和审计
+7. 建立评测集、安全门禁和持续集成
+8. 部署测试环境并开展用户验证
 
