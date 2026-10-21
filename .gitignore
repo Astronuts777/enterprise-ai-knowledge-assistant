@@ -34,3 +34,6 @@ venv/
 data/local/
 uploads/
 
+# Local workspace tools and temporary artifacts
+work/
+
