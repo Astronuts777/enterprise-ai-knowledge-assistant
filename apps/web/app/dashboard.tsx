@@ -478,7 +478,7 @@ export default function Dashboard() {
         </nav>
         <div className="sidebar-foot">
           <span className="security-dot" />权限隔离已启用
-          <small>开发环境 · SQLite</small>
+          <small>{ACCOUNT_MODE ? "账号与加密已启用" : PUBLIC_DEMO ? "公开演示环境" : "开发环境 · SQLite"}</small>
         </div>
       </aside>
 
