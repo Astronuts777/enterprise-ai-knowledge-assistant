@@ -50,7 +50,9 @@ AI 比较了建筑项目合同与规范助手、B2B 软件安全问卷助手、�
 - 本地独立 Git 仓库已初始化，默认分支为 `main`。
 - GitHub 私有仓库已创建：`Astronuts777/enterprise-ai-knowledge-assistant`。
 - 仓库描述为“可信、可授权、可追溯的企业知识库与 AI 决策证据平台”。
-- 首个提交包含 README、项目章程、产品定位、架构决策记录、协作日志和 `.gitignore`。
+- GitHub 远程仓库已包含 README、项目章程、产品定位、架构决策记录、协作日志和 `.gitignore`。
+- 本机缺少 GitHub CLI、HTTPS Git 凭据和可用的 GitHub SSH 身份，因此命令行推送未执行成功；远程文件改由已登录的 GitHub 网页逐项创建。
+- 本地 `origin` 已指向该 GitHub 仓库，但本地和远程提交历史目前独立。正式代码开发前应先完成 GitHub 命令行认证并统一历史，避免直接推送产生冲突。
 
 ### 人工判断状态
 
