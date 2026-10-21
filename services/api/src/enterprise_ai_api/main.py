@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI
@@ -10,7 +11,10 @@ from enterprise_ai_api.database import (
     create_database_engine,
     create_session_factory,
     database_url_from_environment,
+    prepare_database,
 )
+from enterprise_ai_api.document_routes import router as document_router
+from enterprise_ai_api.document_routes import storage_root_from_environment
 from enterprise_ai_api.routes import router
 
 
@@ -33,15 +37,21 @@ def cors_origins_from_environment() -> list[str]:
     ]
 
 
-def create_app(database_url: str | None = None) -> FastAPI:
+def create_app(database_url: str | None = None, storage_root: str | None = None) -> FastAPI:
     application = FastAPI(
         title="Enterprise AI Knowledge Assistant API",
         version="0.1.0",
         description="Permission-aware knowledge and decision evidence API.",
     )
-    engine = create_database_engine(database_url or database_url_from_environment())
+    resolved_database_url = database_url or database_url_from_environment()
+    prepare_database(resolved_database_url)
+    engine = create_database_engine(resolved_database_url)
     application.state.engine = engine
     application.state.session_factory = create_session_factory(engine)
+    application.state.storage_root = (
+        storage_root_from_environment() if storage_root is None else Path(storage_root).resolve()
+    )
+    application.state.storage_root.mkdir(parents=True, exist_ok=True)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins_from_environment(),
@@ -58,6 +68,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return HealthResponse(status="ok", service="enterprise-ai-api")
 
     application.include_router(router, tags=["tenancy"])
+    application.include_router(document_router, tags=["documents"])
     return application
 
 

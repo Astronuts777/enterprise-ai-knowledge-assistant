@@ -24,6 +24,43 @@ export type Space = {
   created_at: string;
 };
 
+export type DocumentStatus = "ready" | "published" | "superseded" | "failed";
+
+export type KnowledgeDocument = {
+  id: string;
+  tenant_id: string;
+  space_id: string;
+  title: string;
+  created_by: string;
+  created_at: string;
+};
+
+export type DocumentVersion = {
+  id: string;
+  tenant_id: string;
+  document_id: string;
+  version_number: number;
+  filename: string;
+  media_type: string;
+  byte_size: number;
+  content_hash: string;
+  status: DocumentStatus;
+  error_message: string | null;
+  created_by: string;
+  created_at: string;
+  published_at: string | null;
+};
+
+export type DocumentSummary = {
+  document: KnowledgeDocument;
+  latest_version: DocumentVersion;
+};
+
+export type DocumentUpload = {
+  document: KnowledgeDocument;
+  version: DocumentVersion;
+};
+
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(
   /\/$/,
   "",
@@ -38,6 +75,11 @@ export class ApiError extends Error {
   }
 }
 
+async function apiError(response: Response): Promise<ApiError> {
+  const body = (await response.json().catch(() => null)) as { detail?: string } | null;
+  return new ApiError(body?.detail ?? "API 请求失败", response.status);
+}
+
 async function request<T>(path: string, actorId: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -50,8 +92,7 @@ async function request<T>(path: string, actorId: string, init?: RequestInit): Pr
   });
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new ApiError(body?.detail ?? "API 请求失败", response.status);
+    throw await apiError(response);
   }
 
   return response.json() as Promise<T>;
@@ -96,4 +137,68 @@ export function saveMember(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function listDocuments(
+  actorId: string,
+  tenantId: string,
+  spaceId: string,
+): Promise<DocumentSummary[]> {
+  return request<DocumentSummary[]>(
+    `/v1/tenants/${tenantId}/spaces/${spaceId}/documents`,
+    actorId,
+  );
+}
+
+export async function uploadDocument(
+  actorId: string,
+  tenantId: string,
+  spaceId: string,
+  input: { title: string; file: File },
+): Promise<DocumentUpload> {
+  const form = new FormData();
+  form.set("title", input.title);
+  form.set("file", input.file);
+  const response = await fetch(
+    `${API_BASE_URL}/v1/tenants/${tenantId}/spaces/${spaceId}/documents`,
+    {
+      method: "POST",
+      body: form,
+      headers: { "X-Dev-User-Id": actorId },
+    },
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<DocumentUpload>;
+}
+
+export async function uploadDocumentVersion(
+  actorId: string,
+  tenantId: string,
+  documentId: string,
+  file: File,
+): Promise<DocumentVersion> {
+  const form = new FormData();
+  form.set("file", file);
+  const response = await fetch(
+    `${API_BASE_URL}/v1/tenants/${tenantId}/documents/${documentId}/versions`,
+    {
+      method: "POST",
+      body: form,
+      headers: { "X-Dev-User-Id": actorId },
+    },
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<DocumentVersion>;
+}
+
+export function publishDocumentVersion(
+  actorId: string,
+  tenantId: string,
+  versionId: string,
+): Promise<DocumentVersion> {
+  return request<DocumentVersion>(
+    `/v1/tenants/${tenantId}/document-versions/${versionId}/publish`,
+    actorId,
+    { method: "POST" },
+  );
 }

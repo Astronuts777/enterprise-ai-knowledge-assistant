@@ -5,6 +5,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 import {
   ApiError,
   Classification,
+  DocumentSummary,
   Membership,
   MembershipRole,
   Space,
@@ -12,12 +13,16 @@ import {
   createSpace,
   createTenant,
   getTenant,
+  listDocuments,
   listMembers,
   listSpaces,
+  publishDocumentVersion,
   saveMember,
+  uploadDocument,
+  uploadDocumentVersion,
 } from "../lib/api";
 
-type View = "overview" | "spaces" | "members";
+type View = "overview" | "spaces" | "documents" | "members";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -34,7 +39,7 @@ const classificationLabels: Record<Classification, string> = {
   restricted: "严格受限",
 };
 
-function Icon({ name }: { name: "home" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" }) {
+function Icon({ name }: { name: "home" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" | "file" | "upload" | "back" }) {
   const paths: Record<typeof name, ReactNode> = {
     home: <><path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5M9 21v-7h6v7" /></>,
     spaces: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 9v11" /></>,
@@ -43,6 +48,9 @@ function Icon({ name }: { name: "home" | "spaces" | "members" | "settings" | "pl
     plus: <path d="M12 5v14M5 12h14" />,
     arrow: <path d="m9 18 6-6-6-6" />,
     shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Zm-3-10 2 2 4-4" />,
+    file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 13h8M8 17h6" /></>,
+    upload: <><path d="M12 16V4M7 9l5-5 5 5" /><path d="M5 20h14" /></>,
+    back: <path d="m15 18-6-6 6-6" />,
   };
   return <svg aria-hidden="true" className="icon" viewBox="0 0 24 24">{paths[name]}</svg>;
 }
@@ -55,11 +63,19 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(new Date(value));
 }
 
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function Dashboard() {
   const [actorId, setActorId] = useState("");
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
+  const [documentsBySpace, setDocumentsBySpace] = useState<Record<string, DocumentSummary[]>>({});
+  const [activeSpace, setActiveSpace] = useState<Space | null>(null);
   const [members, setMembers] = useState<Membership[]>([]);
   const [canManageMembers, setCanManageMembers] = useState(true);
   const [view, setView] = useState<View>("overview");
@@ -67,6 +83,8 @@ export default function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [spaceDialog, setSpaceDialog] = useState(false);
   const [memberDialog, setMemberDialog] = useState(false);
+  const [uploadDialog, setUploadDialog] = useState(false);
+  const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadWorkspace = useCallback(async (userId: string, organizationId: string) => {
@@ -76,6 +94,13 @@ export default function Dashboard() {
     ]);
     setTenant(loadedTenant);
     setSpaces(loadedSpaces);
+    const documentEntries = await Promise.all(
+      loadedSpaces.map(async (space) => [
+        space.id,
+        await listDocuments(userId, organizationId, space.id),
+      ] as const),
+    );
+    setDocumentsBySpace(Object.fromEntries(documentEntries));
     try {
       setMembers(await listMembers(userId, organizationId));
       setCanManageMembers(true);
@@ -160,7 +185,12 @@ export default function Dashboard() {
         name: String(form.get("name") ?? "").trim(),
         classification: String(form.get("classification")) as Classification,
       });
-      setSpaces(await listSpaces(actorId, tenantId));
+      const loadedSpaces = await listSpaces(actorId, tenantId);
+      setSpaces(loadedSpaces);
+      setDocumentsBySpace((current) => ({
+        ...current,
+        ...Object.fromEntries(loadedSpaces.map((space) => [space.id, current[space.id] ?? []])),
+      }));
       setSpaceDialog(false);
       setNotice("知识空间已创建");
     } catch (error) {
@@ -191,11 +221,64 @@ export default function Dashboard() {
     }
   }
 
+  async function handleUploadDocument(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tenantId || !activeSpace) return;
+    const form = new FormData(event.currentTarget);
+    const file = form.get("file");
+    if (!(file instanceof File) || file.size === 0) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      if (versionTarget) {
+        await uploadDocumentVersion(actorId, tenantId, versionTarget.document.id, file);
+        setNotice("新版本已上传，确认内容后即可发布");
+      } else {
+        await uploadDocument(actorId, tenantId, activeSpace.id, {
+          title: String(form.get("title") ?? "").trim() || file.name.replace(/\.[^.]+$/, ""),
+          file,
+        });
+        setNotice("文档已解析，确认内容后即可发布");
+      }
+      const documents = await listDocuments(actorId, tenantId, activeSpace.id);
+      setDocumentsBySpace((current) => ({ ...current, [activeSpace.id]: documents }));
+      setUploadDialog(false);
+      setVersionTarget(null);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "上传文档失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handlePublish(summary: DocumentSummary) {
+    if (!tenantId || !activeSpace) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await publishDocumentVersion(actorId, tenantId, summary.latest_version.id);
+      const documents = await listDocuments(actorId, tenantId, activeSpace.id);
+      setDocumentsBySpace((current) => ({ ...current, [activeSpace.id]: documents }));
+      setNotice(`《${summary.document.title}》已发布`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "发布文档失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openSpace(space: Space) {
+    setActiveSpace(space);
+    setView("documents");
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(TENANT_KEY);
     setTenantId(null);
     setTenant(null);
     setSpaces([]);
+    setDocumentsBySpace({});
+    setActiveSpace(null);
     setMembers([]);
     setView("overview");
   }
@@ -251,7 +334,7 @@ export default function Dashboard() {
         <nav aria-label="主导航">
           <p>工作区</p>
           {navItems.map((item) => (
-            <button className={view === item.key ? "active" : ""} key={item.key} onClick={() => setView(item.key)}>
+            <button className={view === item.key || (item.key === "spaces" && view === "documents") ? "active" : ""} key={item.key} onClick={() => setView(item.key)}>
               <Icon name={item.icon} />{item.label}
               {item.key === "spaces" && spaces.length > 0 && <em>{spaces.length}</em>}
             </button>
@@ -274,10 +357,21 @@ export default function Dashboard() {
         <div className="content">
           {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
           {view === "overview" && (
-            <Overview tenant={tenant} spaces={spaces} members={members} onCreateSpace={() => setSpaceDialog(true)} onViewSpaces={() => setView("spaces")} />
+            <Overview tenant={tenant} spaces={spaces} members={members} documentsBySpace={documentsBySpace} onCreateSpace={() => setSpaceDialog(true)} onViewSpaces={() => setView("spaces")} onOpenSpace={openSpace} />
           )}
           {view === "spaces" && (
-            <SpacesView spaces={spaces} onCreate={() => setSpaceDialog(true)} />
+            <SpacesView spaces={spaces} documentsBySpace={documentsBySpace} onCreate={() => setSpaceDialog(true)} onOpen={openSpace} />
+          )}
+          {view === "documents" && activeSpace && (
+            <DocumentsView
+              space={activeSpace}
+              documents={documentsBySpace[activeSpace.id] ?? []}
+              busy={busy}
+              onBack={() => setView("spaces")}
+              onUpload={() => { setVersionTarget(null); setUploadDialog(true); }}
+              onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
+              onPublish={handlePublish}
+            />
           )}
           {view === "members" && (
             <MembersView members={members} actorId={actorId} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} />
@@ -301,37 +395,62 @@ export default function Dashboard() {
           <div className="dialog-actions"><button type="button" onClick={() => setMemberDialog(false)}>取消</button><button className="primary-button" disabled={busy} type="submit">{busy ? "保存中…" : "添加成员"}</button></div>
         </form>
       </Dialog>}
+
+      {uploadDialog && activeSpace && <Dialog
+        title={versionTarget ? "上传新版本" : "导入企业资料"}
+        description={versionTarget ? `为《${versionTarget.document.title}》添加不可变的新版本。` : `文件将进入“${activeSpace.name}”并自动解析定位。`}
+        onClose={() => { setUploadDialog(false); setVersionTarget(null); }}
+      >
+        <form className="dialog-form" onSubmit={handleUploadDocument}>
+          {!versionTarget && <label>文档标题<input name="title" maxLength={255} placeholder="默认使用文件名" /></label>}
+          <label>选择文件<input className="file-input" name="file" type="file" accept=".pdf,.docx,.txt,.md" required /></label>
+          <p className="upload-hint">支持 PDF、DOCX、TXT、Markdown，最大 10 MB。上传后需人工发布。</p>
+          <div className="dialog-actions"><button type="button" onClick={() => { setUploadDialog(false); setVersionTarget(null); }}>取消</button><button className="primary-button" disabled={busy} type="submit"><Icon name="upload" />{busy ? "解析中…" : "上传并解析"}</button></div>
+        </form>
+      </Dialog>}
     </main>
   );
 }
 
-function Overview({ tenant, spaces, members, onCreateSpace, onViewSpaces }: { tenant: Tenant; spaces: Space[]; members: Membership[]; onCreateSpace: () => void; onViewSpaces: () => void }) {
+function Overview({ tenant, spaces, members, documentsBySpace, onCreateSpace, onViewSpaces, onOpenSpace }: { tenant: Tenant; spaces: Space[]; members: Membership[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreateSpace: () => void; onViewSpaces: () => void; onOpenSpace: (space: Space) => void }) {
+  const documents = Object.values(documentsBySpace).flat();
+  const publishedCount = documents.filter((item) => item.latest_version.status === "published").length;
+  const completedSteps = (spaces.length > 0 ? 1 : 0) + (documents.length > 0 ? 1 : 0);
   return <>
     <div className="page-heading"><div><p className="kicker">工作区总览</p><h1>早上好，{tenant.name}</h1><p>你的可信知识基础已经建立。下一步，从创建空间并导入第一份企业资料开始。</p></div><button className="primary-button" onClick={onCreateSpace}><Icon name="plus" />创建知识空间</button></div>
     <section className="stats-grid" aria-label="工作区统计">
       <article><span>知识空间</span><strong>{spaces.length}</strong><small>{spaces.length ? "权限边界运行正常" : "等待创建第一个空间"}</small></article>
       <article><span>企业成员</span><strong>{members.length || "—"}</strong><small>按企业角色授权</small></article>
-      <article><span>已发布文档</span><strong>0</strong><small>文档流程即将接入</small></article>
-      <article className="health-card"><span>知识健康度</span><strong>准备中</strong><small><i />权限层已就绪</small></article>
+      <article><span>已发布文档</span><strong>{publishedCount}</strong><small>{documents.length ? `共 ${documents.length} 份资料` : "等待导入第一份资料"}</small></article>
+      <article className="health-card"><span>知识健康度</span><strong>{publishedCount ? "可检索" : "准备中"}</strong><small><i />{publishedCount ? "已发布知识可用" : "权限层已就绪"}</small></article>
     </section>
     <section className="dashboard-grid">
-      <article className="card getting-started"><div className="card-head"><div><p className="kicker">快速开始</p><h2>建立可信知识基础</h2></div><span>{spaces.length > 0 ? "1" : "0"} / 3</span></div>
+      <article className="card getting-started"><div className="card-head"><div><p className="kicker">快速开始</p><h2>建立可信知识基础</h2></div><span>{completedSteps} / 3</span></div>
         <ol>
           <li className={spaces.length > 0 ? "done" : "current"}><i>{spaces.length > 0 ? "✓" : "1"}</i><div><b>创建知识空间</b><span>为政策、项目或部门划分安全边界</span></div>{spaces.length === 0 && <button onClick={onCreateSpace}>现在创建</button>}</li>
-          <li><i>2</i><div><b>导入企业资料</b><span>上传 PDF、DOCX、Markdown 或文本</span></div><em>下一阶段</em></li>
+          <li className={documents.length > 0 ? "done" : spaces.length > 0 ? "current" : ""}><i>{documents.length > 0 ? "✓" : "2"}</i><div><b>导入企业资料</b><span>上传 PDF、DOCX、Markdown 或文本</span></div>{spaces.length > 0 && documents.length === 0 ? <button onClick={() => onOpenSpace(spaces[0])}>现在导入</button> : <em>{documents.length ? "已完成" : "等待空间"}</em>}</li>
           <li><i>3</i><div><b>提出第一个问题</b><span>获得带原文引用的可信回答</span></div><em>下一阶段</em></li>
         </ol>
       </article>
       <article className="card spaces-summary"><div className="card-head"><div><p className="kicker">知识空间</p><h2>最近空间</h2></div><button onClick={onViewSpaces}>查看全部</button></div>
-        {spaces.length === 0 ? <div className="empty-mini"><span><Icon name="spaces" /></span><b>还没有知识空间</b><p>创建一个空间，开始组织企业知识。</p></div> : <ul>{spaces.slice(0, 4).map((space) => <li key={space.id}><span className={`classification ${space.classification}`}>{space.name.slice(0, 1)}</span><div><b>{space.name}</b><small>{classificationLabels[space.classification]} · {formatDate(space.created_at)}</small></div><Icon name="arrow" /></li>)}</ul>}
+        {spaces.length === 0 ? <div className="empty-mini"><span><Icon name="spaces" /></span><b>还没有知识空间</b><p>创建一个空间，开始组织企业知识。</p></div> : <ul>{spaces.slice(0, 4).map((space) => <li key={space.id} onClick={() => onOpenSpace(space)}><span className={`classification ${space.classification}`}>{space.name.slice(0, 1)}</span><div><b>{space.name}</b><small>{classificationLabels[space.classification]} · {documentsBySpace[space.id]?.length ?? 0} 份资料</small></div><Icon name="arrow" /></li>)}</ul>}
       </article>
     </section>
   </>;
 }
 
-function SpacesView({ spaces, onCreate }: { spaces: Space[]; onCreate: () => void }) {
+function SpacesView({ spaces, documentsBySpace, onCreate, onOpen }: { spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreate: () => void; onOpen: (space: Space) => void }) {
   return <><div className="page-heading"><div><p className="kicker">知识治理</p><h1>知识空间</h1><p>每个空间都是独立的权限和资料边界。</p></div><button className="primary-button" onClick={onCreate}><Icon name="plus" />创建空间</button></div>
-    {spaces.length === 0 ? <section className="empty-state"><span><Icon name="spaces" /></span><h2>创建第一个知识空间</h2><p>可以按部门、项目或知识主题划分，例如“公司政策”“项目 A”“客户交付”。</p><button className="primary-button" onClick={onCreate}>创建知识空间</button></section> : <section className="space-grid">{spaces.map((space) => <article key={space.id}><div className={`space-icon ${space.classification}`}>{space.name.slice(0, 1)}</div><span className={`badge ${space.classification}`}>{classificationLabels[space.classification]}</span><h2>{space.name}</h2><p>暂无文档 · 创建于 {formatDate(space.created_at)}</p><div><span><Icon name="shield" />权限隔离</span><button disabled>进入空间 <Icon name="arrow" /></button></div></article>)}</section>}
+    {spaces.length === 0 ? <section className="empty-state"><span><Icon name="spaces" /></span><h2>创建第一个知识空间</h2><p>可以按部门、项目或知识主题划分，例如“公司政策”“项目 A”“客户交付”。</p><button className="primary-button" onClick={onCreate}>创建知识空间</button></section> : <section className="space-grid">{spaces.map((space) => <article key={space.id} onClick={() => onOpen(space)}><div className={`space-icon ${space.classification}`}>{space.name.slice(0, 1)}</div><span className={`badge ${space.classification}`}>{classificationLabels[space.classification]}</span><h2>{space.name}</h2><p>{documentsBySpace[space.id]?.length ?? 0} 份资料 · 创建于 {formatDate(space.created_at)}</p><div><span><Icon name="shield" />权限隔离</span><button>进入空间 <Icon name="arrow" /></button></div></article>)}</section>}
+  </>;
+}
+
+function DocumentsView({ space, documents, busy, onBack, onUpload, onNewVersion, onPublish }: { space: Space; documents: DocumentSummary[]; busy: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void }) {
+  const statusLabels = { ready: "待发布", published: "已发布", superseded: "已替代", failed: "解析失败" };
+  return <>
+    <button className="back-button" onClick={onBack}><Icon name="back" />返回知识空间</button>
+    <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>上传、检查并发布企业资料；只有已发布版本会进入后续检索。</p></div><button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button></div>
+    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>导入第一份企业资料</h2><p>支持 PDF、DOCX、TXT 和 Markdown。系统会保存原件、计算哈希并生成带定位的文本块。</p><button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button></section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><div><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></div><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions">{item.latest_version.status === "ready" && <button disabled={busy} onClick={() => onPublish(item)}>发布</button>}<button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button></div></article>)}</section>}
   </>;
 }
 

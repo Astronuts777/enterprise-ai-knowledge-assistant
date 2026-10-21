@@ -32,6 +32,8 @@ pnpm dev:web
 - 查看工作区总览和权限基础状态。
 - 创建不同保密等级的知识空间。
 - 添加企业成员并分配企业管理员、知识管理员或普通成员角色。
+- 在知识空间中上传、解析和发布 PDF、DOCX、TXT 与 Markdown。
+- 为同一逻辑文档上传新版本，旧发布版本会保留并标记为已替代。
 - 在前端直接显示 API 权限错误和跨租户拒绝结果。
 
 Web 默认连接 `http://localhost:8000`。需要修改 API 地址时，复制
@@ -46,7 +48,8 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.lock
 .venv/bin/python -m pytest
 .venv/bin/ruff check .
-.venv/bin/uvicorn enterprise_ai_api.main:app --app-dir services/api/src --reload
+PYTHONPATH=services/api/src:packages/core/src \
+  .venv/bin/uvicorn enterprise_ai_api.main:app --reload
 ```
 
 API 健康检查位于 `http://localhost:8000/healthz`。
@@ -60,9 +63,17 @@ POST /v1/tenants/{tenant_id}/members
 GET  /v1/tenants/{tenant_id}/members
 POST /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces
+POST /v1/tenants/{tenant_id}/spaces/{space_id}/documents
+GET  /v1/tenants/{tenant_id}/spaces/{space_id}/documents
+GET  /v1/tenants/{tenant_id}/documents/{document_id}
+POST /v1/tenants/{tenant_id}/documents/{document_id}/versions
+GET  /v1/tenants/{tenant_id}/document-versions/{version_id}/chunks
+POST /v1/tenants/{tenant_id}/document-versions/{version_id}/publish
 ```
 
-未设置 `DATABASE_URL` 时，API 使用进程内 SQLite，适合立即体验和运行测试。打开
+未设置 `DATABASE_URL` 时，API 使用持久化 SQLite：业务记录保存在
+`data/local/enterprise_ai.db`，上传原件保存在 `data/local/uploads/`。两个位置都被 Git 忽略，
+重启 API 后数据不会丢失。API 启动时会自动执行本地 Alembic 迁移。打开
 `http://localhost:8000/docs` 可在 Swagger UI 中调用接口。当前身份适配器使用
 `X-Dev-User-Id` 请求头模拟已验证用户，例如：
 
@@ -75,6 +86,12 @@ curl -X POST http://localhost:8000/v1/tenants \
 
 `X-Dev-User-Id` 仅用于本地纵向切片；接入企业 SSO 后必须由服务端验证的身份声明替代，
 不能在生产环境信任客户端自报的用户 ID。
+
+本地备份前先停止 API，然后复制整个 `data/local/` 目录。需要全新演示环境时，停止 API，
+将该目录移到其他位置保存，再重新启动；系统会创建新的数据库和上传目录。
+
+当前 10 MB 以内的文档在请求内完成首轮解析，以便验证完整链路。进入大文件、OCR 和批量导入
+阶段后，解析将迁移到已有 Worker 边界，避免阻塞 API。
 
 ### 本地依赖服务
 
@@ -92,10 +109,11 @@ PostgreSQL 启动后，先以表所有者执行迁移，再以不具备 `BYPASSR
 MIGRATION_DATABASE_URL='postgresql+psycopg://app_owner:local-development-only@localhost:5432/enterprise_ai' \
   .venv/bin/alembic upgrade head
 DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:5432/enterprise_ai' \
-  .venv/bin/uvicorn enterprise_ai_api.main:app --app-dir services/api/src --reload
+  PYTHONPATH=services/api/src:packages/core/src \
+  .venv/bin/uvicorn enterprise_ai_api.main:app --reload
 ```
 
-迁移会为 `tenants`、`memberships` 和 `spaces` 启用并强制执行 PostgreSQL 行级安全。
+迁移会为企业、成员、空间、文档、版本和文本块表启用并强制执行 PostgreSQL 行级安全。
 应用层仍会在每个用例执行显式授权，构成两层隔离。
 
 `requirements-dev.txt` 记录直接 Python 依赖，`requirements.lock` 和 `pnpm-lock.yaml` 固定完整依赖解析结果。

@@ -2,8 +2,11 @@
 
 import os
 from collections.abc import Generator
+from pathlib import Path
 from uuid import UUID
 
+from alembic import command
+from alembic.config import Config
 from fastapi import Request
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -14,8 +17,30 @@ class Base(DeclarativeBase):
     pass
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_DATABASE_URL = "sqlite:///data/local/enterprise_ai.db"
+
+
 def database_url_from_environment() -> str:
-    return os.getenv("DATABASE_URL", "sqlite://")
+    return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def prepare_database(database_url: str) -> None:
+    """Create a persistent local database through Alembic before opening the API."""
+
+    if database_url == "sqlite://":
+        return
+    if database_url.startswith("sqlite:///"):
+        database_path = Path(database_url.removeprefix("sqlite:///"))
+        if not database_path.is_absolute():
+            database_path = PROJECT_ROOT / database_path
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        database_url = f"sqlite:///{database_path}"
+
+        config = Config(str(PROJECT_ROOT / "alembic.ini"))
+        config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+        config.set_main_option("sqlalchemy.url", database_url)
+        command.upgrade(config, "head")
 
 
 def create_database_engine(database_url: str) -> Engine:
