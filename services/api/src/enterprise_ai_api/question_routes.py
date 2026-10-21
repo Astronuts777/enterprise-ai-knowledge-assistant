@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.models import AnswerCitation, Document, KnowledgeAnswer
 from enterprise_ai_api.retrieval import build_grounded_answer, search_published_knowledge
@@ -110,6 +111,19 @@ def ask_knowledge_question(
                 relevance_score=item.score,
             )
         )
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="knowledge.question_answered",
+        resource_type="knowledge_answer",
+        resource_id=answer.id,
+        details={
+            "status": answer_status,
+            "citation_count": len(evidence),
+            "space_count": len(scoped_space_ids),
+        },
+    )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(answer)

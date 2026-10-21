@@ -34,6 +34,20 @@ export type SpaceMembership = {
   created_at: string;
 };
 
+export type AuditOutcome = "success" | "denied" | "failure";
+
+export type AuditEvent = {
+  id: string;
+  tenant_id: string;
+  actor_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  outcome: AuditOutcome;
+  details: Record<string, string | number | boolean | null>;
+  created_at: string;
+};
+
 export type DocumentStatus = "ready" | "published" | "superseded" | "failed";
 
 export type KnowledgeDocument = {
@@ -320,6 +334,17 @@ export function removeSpaceMember(
 
 export function listMembers(actorId: string, tenantId: string): Promise<Membership[]> {
   return request<Membership[]>(`/v1/tenants/${tenantId}/members`, actorId);
+}
+
+export function listAuditEvents(
+  actorId: string,
+  tenantId: string,
+  limit = 100,
+): Promise<AuditEvent[]> {
+  return request<AuditEvent[]>(
+    `/v1/tenants/${tenantId}/audit-events?limit=${limit}`,
+    actorId,
+  );
 }
 
 export function saveMember(

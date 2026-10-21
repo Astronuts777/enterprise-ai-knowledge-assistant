@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import content_fingerprint, encrypt_bytes
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.document_processing import (
@@ -130,6 +131,7 @@ def _add_version(
     extension: str,
     media_type: str | None,
     content: bytes,
+    audit_action: str,
 ) -> DocumentVersion:
     content_hash = content_fingerprint(content)
     duplicate = session.scalar(
@@ -200,6 +202,22 @@ def _add_version(
             )
         )
 
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action=audit_action,
+        resource_type="document_version",
+        resource_id=version_id,
+        details={
+            "document_id": str(document.id),
+            "space_id": str(document.space_id),
+            "version_number": version_number,
+            "byte_size": len(content),
+            "status": version_status,
+        },
+    )
+
     try:
         session.commit()
     except Exception:
@@ -265,6 +283,7 @@ async def upload_document(
         extension=extension,
         media_type=file.content_type,
         content=content,
+        audit_action="document.created",
     )
     return DocumentUploadResponse(document=document, version=version)
 
@@ -302,6 +321,7 @@ async def upload_document_version(
         extension=extension,
         media_type=file.content_type,
         content=content,
+        audit_action="document.version_uploaded",
     )
 
 
@@ -436,6 +456,18 @@ def publish_document_version(
         previous.status = "superseded"
     version.status = "published"
     version.published_at = datetime.now(UTC)
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="document.published",
+        resource_type="document_version",
+        resource_id=version.id,
+        details={
+            "document_id": str(version.document_id),
+            "version_number": version.version_number,
+        },
+    )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(version)

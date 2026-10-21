@@ -23,6 +23,7 @@
 8. 只针对当前用户获准访问的已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
 9. 在资料不足时明确拒答，不用没有来源的内容补全答案。
 10. 保存当前用户自己的问答历史，并阻止跨企业、跨空间读取数据。
+11. 由企业管理员查看身份、权限、文档和问答操作的追加式审计日志。
 
 适合用来验证以下场景：
 
@@ -39,7 +40,7 @@
 - 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
 - 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
 - 登录按账号和网络来源进行数据库级限流；多因素认证、企业 SSO、设备管理和异常检测尚未接入。
-- SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和完整审计仍在路线图中。
+- SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和审计导出仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
@@ -368,6 +369,7 @@ GET  /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces/{space_id}/members
 POST /v1/tenants/{tenant_id}/spaces/{space_id}/members
 DELETE /v1/tenants/{tenant_id}/spaces/{space_id}/members/{user_id}
+GET  /v1/tenants/{tenant_id}/audit-events
 POST /v1/tenants/{tenant_id}/spaces/{space_id}/documents
 GET  /v1/tenants/{tenant_id}/spaces/{space_id}/documents
 GET  /v1/tenants/{tenant_id}/documents/{document_id}
@@ -461,9 +463,10 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [x] 敏感数据库字段与上传原件的 AES-256-GCM 加密
 - [x] 邮箱验证、密码重置、邀请邮件和数据库级登录限流
 - [x] 知识空间只读者/管理员 ACL 与检索隔离
+- [x] 企业管理员审计日志、拒绝事件记录与 PostgreSQL 追加式保护
 - [ ] pgvector 关键词与语义混合检索
 - [ ] 可配置的大模型生成与引用校验
-- [ ] 决策证据包、人工审批和审计事件
+- [ ] 决策证据包、人工审批和审计导出
 - [ ] 异步 Worker、OCR 和批量导入
 - [ ] 企业 SSO、SCIM 与外部知识连接器
 - [ ] 评测集、安全门禁、备份和生产运维

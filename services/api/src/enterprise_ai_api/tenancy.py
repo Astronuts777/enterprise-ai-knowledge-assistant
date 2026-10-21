@@ -11,6 +11,7 @@ from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import token_hash
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.models import (
@@ -149,6 +150,17 @@ def authorize_tenant_action(
     try:
         authorize(context, ResourceScope(tenant_id=tenant_id), action)
     except PermissionDenied as error:
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="authorization.denied",
+            resource_type="tenant",
+            resource_id=tenant_id,
+            outcome="denied",
+            details={"requested_action": action.value},
+        )
+        session.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Resource not found or access denied",
@@ -215,6 +227,17 @@ def authorize_space_access(
         return space
     grant = session.get(SpaceMembership, (tenant_id, space_id, user_id))
     if grant is None or (manage and grant.role != "manager"):
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="authorization.denied",
+            resource_type="space",
+            resource_id=space_id,
+            outcome="denied",
+            details={"requested_access": "manage" if manage else "view"},
+        )
+        session.commit()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resource not found or access denied",

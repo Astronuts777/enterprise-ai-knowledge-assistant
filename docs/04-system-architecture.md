@@ -91,7 +91,7 @@ flowchart LR
 | `decision_packs` | `id`, `tenant_id`, `owner_id`, `status`, `version` |
 | `decision_pack_revisions` | `decision_pack_id`, `content`, `actor_type`, `actor_id` |
 | `approvals` | `decision_pack_id`, `reviewer_id`, `decision`, `comment`, `created_at` |
-| `audit_events` | `tenant_id`, `actor_id`, `action`, `resource_type`, `resource_id`, `result`, `metadata` |
+| `audit_events` | `tenant_id`, `actor_id`, `action`, `resource_type`, `resource_id`, `outcome`, `details` |
 | `jobs` | `tenant_id`, `type`, `payload_ref`, `status`, `attempts`, `available_at` |
 
 正文、模型输入和敏感元数据不应无差别复制到审计表。
@@ -161,7 +161,7 @@ GET    /v1/answers/{answer_id}
 POST   /v1/answers/{answer_id}/decision-packs
 POST   /v1/decision-packs/{pack_id}/submit
 POST   /v1/decision-packs/{pack_id}/reviews
-GET    /v1/audit-events
+GET    /v1/tenants/{tenant_id}/audit-events
 ```
 
 所有资源标识都必须在当前租户和权限上下文中解析，不能只凭全局 ID 查询。

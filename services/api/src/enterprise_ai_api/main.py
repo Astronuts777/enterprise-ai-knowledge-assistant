@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from enterprise_ai_api.audit_routes import router as audit_router
 from enterprise_ai_api.auth_routes import router as auth_router
 from enterprise_ai_api.crypto import require_production_key
 from enterprise_ai_api.database import (
@@ -155,6 +156,7 @@ def create_app(
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
     application.include_router(question_router, tags=["knowledge-answers"])
+    application.include_router(audit_router, tags=["audit"])
 
     static_directory = os.getenv("WEB_STATIC_DIR")
     if static_directory:

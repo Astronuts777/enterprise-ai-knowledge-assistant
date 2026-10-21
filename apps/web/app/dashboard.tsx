@@ -5,6 +5,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 import {
   ApiError,
   Account,
+  AuditEvent,
   Classification,
   DocumentSummary,
   KnowledgeAnswer,
@@ -23,6 +24,7 @@ import {
   getTenant,
   loginAccount,
   listDocuments,
+  listAuditEvents,
   listMembers,
   listQuestionHistory,
   listSpaceMembers,
@@ -42,7 +44,7 @@ import {
   verifyEmail,
 } from "../lib/api";
 
-type View = "overview" | "assistant" | "spaces" | "documents" | "members";
+type View = "overview" | "assistant" | "spaces" | "documents" | "members" | "audit";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -59,6 +61,28 @@ const classificationLabels: Record<Classification, string> = {
   internal: "内部",
   confidential: "机密",
   restricted: "严格受限",
+};
+
+const auditActionLabels: Record<string, string> = {
+  "account.registered": "账号注册",
+  "account.login": "账号登录",
+  "account.logout": "安全退出",
+  "account.email_verified": "邮箱验证",
+  "account.verification_requested": "请求验证邮件",
+  "account.password_reset_requested": "请求密码重置",
+  "account.password_reset": "完成密码重置",
+  "invitation.created": "创建企业邀请",
+  "invitation.accepted": "接受企业邀请",
+  "tenant.created": "创建企业",
+  "membership.saved": "更新企业成员",
+  "space.created": "创建知识空间",
+  "space_access.saved": "更新空间权限",
+  "space_access.removed": "撤销空间权限",
+  "document.created": "上传文档",
+  "document.version_uploaded": "上传文档版本",
+  "document.published": "发布文档版本",
+  "knowledge.question_answered": "知识问答",
+  "authorization.denied": "访问被拒绝",
 };
 
 function Icon({ name }: { name: "home" | "assistant" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" | "file" | "upload" | "back" | "send" | "quote" }) {
@@ -88,6 +112,16 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(new Date(value));
 }
 
+function formatAuditDate(value: string): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
@@ -109,6 +143,7 @@ export default function Dashboard() {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [documentsBySpace, setDocumentsBySpace] = useState<Record<string, DocumentSummary[]>>({});
   const [answers, setAnswers] = useState<KnowledgeAnswer[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [activeSpace, setActiveSpace] = useState<Space | null>(null);
   const [members, setMembers] = useState<Membership[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<SpaceMembership[]>([]);
@@ -141,11 +176,19 @@ export default function Dashboard() {
     );
     setDocumentsBySpace(Object.fromEntries(documentEntries));
     try {
-      setMembers(await listMembers(userId, organizationId));
+      const loadedMembers = await listMembers(userId, organizationId);
+      setMembers(loadedMembers);
       setCanManageMembers(true);
+      const actorRole = loadedMembers.find((member) => member.user_id === userId)?.role;
+      setAuditEvents(
+        actorRole === "enterprise_admin"
+          ? await listAuditEvents(userId, organizationId)
+          : [],
+      );
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) {
         setMembers([]);
+        setAuditEvents([]);
         setCanManageMembers(false);
       } else {
         throw error;
@@ -249,6 +292,7 @@ export default function Dashboard() {
     setDocumentsBySpace({});
     setAnswers([]);
     setMembers([]);
+    setAuditEvents([]);
   }
 
   async function handleCreateTenant(event: FormEvent<HTMLFormElement>) {
@@ -451,6 +495,20 @@ export default function Dashboard() {
     }
   }
 
+  async function openAudit() {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      setAuditEvents(await listAuditEvents(actorId, tenantId));
+      setView("audit");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取审计日志");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(TENANT_KEY);
     setTenantId(null);
@@ -458,6 +516,7 @@ export default function Dashboard() {
     setSpaces([]);
     setDocumentsBySpace({});
     setAnswers([]);
+    setAuditEvents([]);
     setActiveSpace(null);
     setMembers([]);
     setView("overview");
@@ -535,6 +594,7 @@ export default function Dashboard() {
             </button>
           ))}
           <p>系统</p>
+          {actorMembership?.role === "enterprise_admin" && <button className={view === "audit" ? "active" : ""} onClick={openAudit}><Icon name="shield" />审计日志<em>{auditEvents.length}</em></button>}
           <button className="disabled-nav" disabled><Icon name="settings" />企业设置<span>即将开放</span></button>
         </nav>
         <div className="sidebar-foot">
@@ -581,6 +641,9 @@ export default function Dashboard() {
           )}
           {view === "members" && (
             <MembersView members={members} actorId={actorId} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} />
+          )}
+          {view === "audit" && actorMembership?.role === "enterprise_admin" && (
+            <AuditView events={auditEvents} />
           )}
           <footer className="workspace-footer">企业 ID {shortId(tenant.id)}<button onClick={ACCOUNT_MODE ? handleLogout : resetDemo}>{ACCOUNT_MODE ? "安全退出" : "切换演示企业"}</button></footer>
         </div>
@@ -861,6 +924,24 @@ function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, on
 function MembersView({ members, actorId, canManage, onAdd }: { members: Membership[]; actorId: string; canManage: boolean; onAdd: () => void }) {
   return <><div className="page-heading"><div><p className="kicker">访问控制</p><h1>成员与权限</h1><p>企业角色决定成员能够管理和访问哪些内容。</p></div>{canManage && <button className="primary-button" onClick={onAdd}><Icon name="plus" />添加成员</button>}</div>
     {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (ACCOUNT_MODE ? "当前账号" : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
+  </>;
+}
+
+function AuditView({ events }: { events: AuditEvent[] }) {
+  return <>
+    <div className="page-heading"><div><p className="kicker">安全追溯</p><h1>企业审计日志</h1><p>记录关键身份、权限、文档和问答操作。正文、问题、答案、邮箱和令牌不会写入审计元数据。</p></div><span className="assistant-mode"><i />仅企业管理员可见</span></div>
+    {events.length === 0
+      ? <section className="empty-state"><span><Icon name="shield" /></span><h2>尚无审计事件</h2><p>后续关键操作会按时间倒序显示在这里。</p></section>
+      : <section className="audit-card">
+        <div className="audit-table-head"><span>事件</span><span>操作者</span><span>资源</span><span>结果</span><span>时间</span></div>
+        {events.map((event) => <article className="audit-row" key={event.id}>
+          <div><b>{auditActionLabels[event.action] ?? event.action}</b><small>{Object.entries(event.details).map(([key, value]) => `${key}: ${String(value)}`).join(" · ") || "无敏感正文"}</small></div>
+          <span>{event.actor_id ? shortId(event.actor_id) : "系统"}</span>
+          <span>{event.resource_type}{event.resource_id ? ` · ${shortId(event.resource_id)}` : ""}</span>
+          <em className={`audit-outcome ${event.outcome}`}>{event.outcome === "success" ? "成功" : event.outcome === "denied" ? "已拒绝" : "失败"}</em>
+          <time dateTime={event.created_at}>{formatAuditDate(event.created_at)}</time>
+        </article>)}
+      </section>}
   </>;
 }
 

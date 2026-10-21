@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.models import Membership, Space, SpaceMembership, Tenant
 from enterprise_ai_api.schemas import (
@@ -49,6 +50,14 @@ def create_tenant(
     session.add(Membership(tenant_id=tenant.id, user_id=user_id, role="enterprise_admin"))
     if user.default_tenant_id is None:
         user.default_tenant_id = tenant.id
+    record_audit_event(
+        session,
+        tenant_id=tenant.id,
+        actor_id=user_id,
+        action="tenant.created",
+        resource_type="tenant",
+        resource_id=tenant.id,
+    )
     session.commit()
     set_tenant_context(session, tenant.id)
     session.refresh(tenant)
@@ -89,6 +98,15 @@ def add_member(
         session.add(membership)
     else:
         membership.role = payload.role
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="membership.saved",
+        resource_type="membership",
+        resource_id=payload.user_id,
+        details={"role": payload.role},
+    )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(membership)
@@ -148,6 +166,15 @@ def create_space(
                 user_id=user_id,
                 role="manager",
             )
+        )
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="space.created",
+            resource_type="space",
+            resource_id=space.id,
+            details={"classification": payload.classification},
         )
         session.commit()
     except IntegrityError as error:
@@ -253,6 +280,15 @@ def save_space_member(
         session.add(grant)
     else:
         grant.role = payload.role
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="space_access.saved",
+        resource_type="space",
+        resource_id=space_id,
+        details={"target_user_id": str(payload.user_id), "role": payload.role},
+    )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(grant)
@@ -298,4 +334,13 @@ def remove_space_member(
                     detail="The last space manager cannot remove their own access",
                 )
         session.delete(grant)
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="space_access.removed",
+            resource_type="space",
+            resource_id=space_id,
+            details={"target_user_id": str(target_user_id), "previous_role": grant.role},
+        )
         session.commit()

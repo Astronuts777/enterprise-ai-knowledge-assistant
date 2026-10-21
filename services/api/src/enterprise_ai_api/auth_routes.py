@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import (
     blind_index,
     new_token,
@@ -243,6 +244,7 @@ def register_account(
     session.add(user)
     session.flush()
 
+    tenant: Tenant | None = None
     if payload.organization_name:
         tenant = Tenant(id=uuid4(), name=payload.organization_name.strip())
         set_tenant_context(session, tenant.id)
@@ -252,6 +254,17 @@ def register_account(
             Membership(tenant_id=tenant.id, user_id=user.id, role="enterprise_admin")
         )
         user.default_tenant_id = tenant.id
+
+    if tenant is not None:
+        record_audit_event(
+            session,
+            tenant_id=tenant.id,
+            actor_id=user.id,
+            action="account.registered",
+            resource_type="user",
+            resource_id=user.id,
+            details={"created_tenant": True},
+        )
 
     verification_token = (
         _issue_account_token(session, user.id, "email_verification")
@@ -305,15 +318,50 @@ def login_account(
         or user.status != "active"
     ):
         session.add(AuthAttempt(identity_hash=identity_hash, network_hash=network_hash))
+        if user is not None and user.default_tenant_id is not None:
+            set_tenant_context(session, user.default_tenant_id)
+            record_audit_event(
+                session,
+                tenant_id=user.default_tenant_id,
+                actor_id=user.id,
+                action="account.login",
+                resource_type="user",
+                resource_id=user.id,
+                outcome="denied",
+                details={"reason": "invalid_credentials"},
+            )
         session.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if request.app.state.require_email_verification and user.email_verified_at is None:
+        if user.default_tenant_id is not None:
+            set_tenant_context(session, user.default_tenant_id)
+            record_audit_event(
+                session,
+                tenant_id=user.default_tenant_id,
+                actor_id=user.id,
+                action="account.login",
+                resource_type="user",
+                resource_id=user.id,
+                outcome="denied",
+                details={"reason": "email_unverified"},
+            )
+            session.commit()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email verification required",
         )
     session.execute(delete(AuthAttempt).where(AuthAttempt.identity_hash == identity_hash))
     token = _new_session(session, user.id)
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.login",
+            resource_type="user",
+            resource_id=user.id,
+        )
     session.commit()
     _set_session_cookie(request, response, token)
     return _account_response(user)
@@ -334,6 +382,16 @@ def verify_email(
     user.email_verified_at = now
     account_token.consumed_at = now
     session_token = _new_session(session, user.id)
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.email_verified",
+            resource_type="user",
+            resource_id=user.id,
+        )
     session.commit()
     _set_session_cookie(request, response, session_token)
     return _account_response(user)
@@ -359,6 +417,16 @@ def resend_verification(
         and not _recent_token_exists(session, user.id, "email_verification")
     ):
         raw_token = _issue_account_token(session, user.id, "email_verification")
+        if user.default_tenant_id is not None:
+            set_tenant_context(session, user.default_tenant_id)
+            record_audit_event(
+                session,
+                tenant_id=user.default_tenant_id,
+                actor_id=user.id,
+                action="account.verification_requested",
+                resource_type="user",
+                resource_id=user.id,
+            )
         session.commit()
         with suppress(EmailDeliveryError):
             _send_verification_email(
@@ -390,6 +458,16 @@ def forgot_password(
         and not _recent_token_exists(session, user.id, "password_reset")
     ):
         raw_token = _issue_account_token(session, user.id, "password_reset")
+        if user.default_tenant_id is not None:
+            set_tenant_context(session, user.default_tenant_id)
+            record_audit_event(
+                session,
+                tenant_id=user.default_tenant_id,
+                actor_id=user.id,
+                action="account.password_reset_requested",
+                resource_type="user",
+                resource_id=user.id,
+            )
         session.commit()
         with suppress(EmailDeliveryError):
             _send_password_reset_email(
@@ -418,6 +496,16 @@ def reset_password(
     account_token.consumed_at = now
     session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
     session_token = _new_session(session, user.id)
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.password_reset",
+            resource_type="user",
+            resource_id=user.id,
+        )
     session.commit()
     _set_session_cookie(request, response, session_token)
     return _account_response(user)
@@ -448,7 +536,18 @@ def logout_account(request: Request, response: Response, session: DatabaseSessio
             select(AuthSession).where(AuthSession.token_hash == token_hash(token))
         )
         if auth_session is not None:
+            user = session.get(User, auth_session.user_id)
             session.delete(auth_session)
+            if user is not None and user.default_tenant_id is not None:
+                set_tenant_context(session, user.default_tenant_id)
+                record_audit_event(
+                    session,
+                    tenant_id=user.default_tenant_id,
+                    actor_id=user.id,
+                    action="account.logout",
+                    resource_type="user",
+                    resource_id=user.id,
+                )
             session.commit()
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
 
@@ -474,6 +573,7 @@ def create_invitation(
     email = _normalize_email(payload.email)
     raw_token = new_token()
     invitation = Invitation(
+        id=uuid4(),
         tenant_id=tenant_id,
         email_ciphertext=email,
         email_lookup_hash=blind_index(email),
@@ -483,6 +583,15 @@ def create_invitation(
         expires_at=datetime.now(UTC) + INVITATION_LIFETIME,
     )
     session.add(invitation)
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="invitation.created",
+        resource_type="invitation",
+        resource_id=invitation.id,
+        details={"role": payload.role},
+    )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(invitation)
@@ -551,5 +660,14 @@ def accept_invitation(
         membership.role = invitation.role
     invitation.accepted_at = now
     user.default_tenant_id = tenant_id
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="invitation.accepted",
+        resource_type="invitation",
+        resource_id=invitation.id,
+        details={"role": invitation.role},
+    )
     session.commit()
     return _account_response(user)

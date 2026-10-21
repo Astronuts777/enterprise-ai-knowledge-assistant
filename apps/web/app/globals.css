@@ -512,6 +512,18 @@ button { cursor: pointer; }
 .active-status { align-items: center; display: flex; gap: 0.4rem; }
 .active-status i { background: #74a659; border-radius: 50%; height: 0.4rem; width: 0.4rem; }
 
+.audit-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
+.audit-table-head, .audit-row { align-items: center; display: grid; gap: 0.8rem; grid-template-columns: minmax(230px, 1.6fr) 0.8fr 1fr 0.55fr 0.85fr; padding: 0 1.3rem; }
+.audit-table-head { background: #f0f3f0; color: #7c8b85; font-size: 0.62rem; font-weight: 800; height: 42px; text-transform: uppercase; }
+.audit-row { border-top: 1px solid #edf0ed; min-height: 76px; }
+.audit-row > div { display: grid; gap: 0.24rem; min-width: 0; }
+.audit-row b { font-size: 0.73rem; }
+.audit-row small { color: var(--muted); font-size: 0.58rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-row > span, .audit-row time { color: var(--muted); font-size: 0.62rem; }
+.audit-outcome { border-radius: 2rem; font-size: 0.6rem; font-style: normal; font-weight: 750; justify-self: start; padding: 0.3rem 0.55rem; }
+.audit-outcome.success { background: #e8f3df; color: #4e743e; }
+.audit-outcome.denied, .audit-outcome.failure { background: #f8e7e4; color: #9b5247; }
+
 .workspace-footer { align-items: center; color: #98a49f; display: flex; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.58rem; justify-content: space-between; margin-top: 4rem; padding: 1rem 0; }
 .workspace-footer button { background: transparent; border: 0; color: #809189; font-family: inherit; font-size: 0.58rem; text-decoration: underline; }
 
@@ -571,6 +583,9 @@ button { cursor: pointer; }
   .document-row { gap: 0.65rem; grid-template-columns: 1fr auto; padding: 1rem; }
   .document-row > span { display: none; }
   .document-actions { grid-column: 2; grid-row: 1; }
+  .audit-table-head { display: none; }
+  .audit-row { align-items: start; grid-template-columns: 1fr auto; padding: 1rem; }
+  .audit-row > span, .audit-row time { display: none; }
   .composer-actions { align-items: stretch; flex-direction: column; }
   .composer-actions .primary-button { width: 100%; }
 }

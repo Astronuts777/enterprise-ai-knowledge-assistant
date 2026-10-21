@@ -74,6 +74,20 @@ class GenericMessage(BaseModel):
     message: str
 
 
+class AuditEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    actor_id: UUID | None
+    action: str
+    resource_type: str
+    resource_id: str | None
+    outcome: Literal["success", "denied", "failure"]
+    details: dict[str, object]
+    created_at: datetime
+
+
 class InvitationCreate(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     role: TenantRole = "member"

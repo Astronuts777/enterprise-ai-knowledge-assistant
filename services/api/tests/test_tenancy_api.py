@@ -217,3 +217,40 @@ def test_space_acl_hides_ungranted_spaces_and_distinguishes_viewer_from_manager(
     assert manager_upload.status_code == 201
     assert revoked.status_code == 204
     assert hidden_again.json() == []
+
+
+def test_enterprise_admin_can_review_audit_events_but_member_cannot() -> None:
+    with client() as test_client:
+        tenant = create_tenant(test_client, ADMIN_A, "Audited Acme")
+        test_client.post(
+            f"/v1/tenants/{tenant['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "member"},
+            headers=headers(ADMIN_A),
+        )
+        test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces",
+            json={"name": "Audited space", "classification": "confidential"},
+            headers=headers(ADMIN_A),
+        )
+        denied = test_client.get(
+            f"/v1/tenants/{tenant['id']}/members",
+            headers=headers(MEMBER_A),
+        )
+        member_audit = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events",
+            headers=headers(MEMBER_A),
+        )
+        admin_audit = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events",
+            headers=headers(ADMIN_A),
+        )
+
+    assert denied.status_code == 403
+    assert member_audit.status_code == 403
+    assert admin_audit.status_code == 200
+    events = admin_audit.json()
+    actions = {event["action"] for event in events}
+    assert {"tenant.created", "membership.saved", "space.created"}.issubset(actions)
+    denied_events = [event for event in events if event["outcome"] == "denied"]
+    assert denied_events
+    assert all("Audited Acme" not in str(event["details"]) for event in events)

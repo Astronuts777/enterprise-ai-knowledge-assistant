@@ -66,6 +66,10 @@ def test_published_knowledge_returns_grounded_answer_and_citations(tmp_path: Pat
             json={"question": "远程办公需要谁批准？"},
             headers=headers(ADMIN_A),
         )
+        audit = test_client.get(
+            f"/v1/tenants/{tenant_id}/audit-events",
+            headers=headers(ADMIN_A),
+        )
 
     assert response.status_code == 201
     result = response.json()
@@ -73,6 +77,12 @@ def test_published_knowledge_returns_grounded_answer_and_citations(tmp_path: Pat
     assert "直属主管批准" in result["answer"]
     assert result["citations"][0]["document_title"] == "Remote work policy"
     assert result["citations"][0]["locator"] == "paragraph:1"
+    question_event = next(
+        event for event in audit.json() if event["action"] == "knowledge.question_answered"
+    )
+    assert question_event["details"]["citation_count"] == 1
+    assert "远程办公" not in str(question_event["details"])
+    assert "直属主管" not in str(question_event["details"])
 
 
 def test_ready_document_is_not_searchable_and_refusal_is_saved(tmp_path: Path) -> None:
