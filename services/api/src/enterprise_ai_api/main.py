@@ -1,12 +1,19 @@
+import json
+import logging
 import os
+import re
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from enterprise_ai_api.audit_routes import router as audit_router
 from enterprise_ai_api.auth_routes import router as auth_router
@@ -35,12 +42,20 @@ class HealthResponse(BaseModel):
     service: Literal["enterprise-ai-api"]
 
 
+class ReadinessResponse(BaseModel):
+    status: Literal["ready", "unavailable"]
+    service: Literal["enterprise-ai-api"]
+    database: Literal["ok", "unavailable"]
+
+
 class SessionResponse(BaseModel):
     user_id: UUID
     mode: Literal["development", "public_demo"]
 
 
 OptionalDevelopmentUserId = Annotated[UUID | None, Header(alias="X-Dev-User-Id")]
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$")
+request_logger = logging.getLogger("enterprise_ai_api.requests")
 
 
 def cors_origins_from_environment() -> list[str]:
@@ -115,8 +130,54 @@ def create_app(
         allow_origins=cors_origins_from_environment(),
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type", "X-Dev-User-Id"],
+        allow_headers=["Content-Type", "X-Dev-User-Id", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
     )
+
+    @application.middleware("http")
+    async def add_security_and_request_tracking(request: Request, call_next) -> Response:
+        supplied_request_id = request.headers.get("X-Request-ID", "")
+        request_id = supplied_request_id
+        if not REQUEST_ID_PATTERN.fullmatch(supplied_request_id):
+            request_id = uuid4().hex
+        request.state.request_id = request_id
+        started_at = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            request_logger.exception(
+                json.dumps(
+                    {
+                        "event": "http_request_failed",
+                        "method": request.method,
+                        "path": request.url.path,
+                        "request_id": request_id,
+                    },
+                    sort_keys=True,
+                )
+            )
+            raise
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if application.state.app_env not in {"development", "test", "testing"}:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        request_logger.info(
+            json.dumps(
+                {
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "event": "http_request_completed",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "request_id": request_id,
+                    "status_code": response.status_code,
+                },
+                sort_keys=True,
+            )
+        )
+        return response
 
     if engine.dialect.name == "sqlite":
         Base.metadata.create_all(engine)
@@ -124,6 +185,32 @@ def create_app(
     @application.get("/healthz", response_model=HealthResponse, tags=["operations"])
     def health() -> HealthResponse:
         return HealthResponse(status="ok", service="enterprise-ai-api")
+
+    @application.get(
+        "/readyz",
+        response_model=ReadinessResponse,
+        responses={503: {"model": ReadinessResponse}},
+        tags=["operations"],
+    )
+    def readiness(request: Request) -> ReadinessResponse | JSONResponse:
+        try:
+            with request.app.state.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            payload = ReadinessResponse(
+                status="unavailable",
+                service="enterprise-ai-api",
+                database="unavailable",
+            )
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content=payload.model_dump(),
+            )
+        return ReadinessResponse(
+            status="ready",
+            service="enterprise-ai-api",
+            database="ok",
+        )
 
     @application.post("/v1/session", response_model=SessionResponse, tags=["identity"])
     def open_session(

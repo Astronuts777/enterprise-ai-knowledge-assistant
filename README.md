@@ -385,6 +385,7 @@ POST /v1/tenants/{tenant_id}/document-versions/{version_id}/publish
 POST /v1/tenants/{tenant_id}/questions
 GET  /v1/tenants/{tenant_id}/questions
 GET  /healthz
+GET  /readyz
 ```
 
 默认本地开发模式可使用 `X-Dev-User-Id` 模拟身份：
@@ -423,8 +424,9 @@ curl -X POST http://localhost:8000/v1/tenants \
 2. 等待 Render 自动构建该提交。
 3. 如果未自动触发，在 Render 选择 **Manual Deploy → Deploy latest commit**。
 4. 确认状态为 **Deploy succeeded | Live**。
-5. 打开公开地址，实际完成一次企业创建和知识空间操作。
-6. 检查 Render 日志中没有新的 500、数据库约束或迁移错误。
+5. 确认 `/healthz` 与实际查询数据库的 `/readyz` 都返回 HTTP 200。
+6. 打开公开地址，实际完成一次企业创建和知识空间操作。
+7. 检查 Render 日志中没有新的 500、数据库约束或迁移错误。
 
 免费演示环境的限制：
 
@@ -479,6 +481,7 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [x] 知识空间只读者/管理员 ACL 与检索隔离
 - [x] 企业管理员审计日志、拒绝事件记录与 PostgreSQL 追加式保护
 - [x] 独立密钥加密的 PostgreSQL 备份与隔离恢复演练工具
+- [x] 数据库就绪检查、请求 ID、结构化访问日志与生产配置审计
 - [ ] pgvector 关键词与语义混合检索
 - [ ] 可配置的大模型生成与引用校验
 - [ ] 决策证据包、人工审批和审计导出
@@ -498,3 +501,4 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [初始技术栈提案](docs/decisions/ADR-0002-initial-technology-stack.md)
 - [安全、身份与加密设计](docs/05-security-and-access-control.md)
 - [备份、恢复演练与数据保留](docs/06-backup-and-recovery.md)
+- [生产运行、监控与配置审计](docs/07-production-operations.md)

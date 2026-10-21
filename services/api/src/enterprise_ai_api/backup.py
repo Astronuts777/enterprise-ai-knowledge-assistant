@@ -110,6 +110,16 @@ def _encryption_key() -> bytes:
     return key
 
 
+def backup_encryption_key_is_valid() -> bool:
+    """Return key validity without exposing the configured key or raising diagnostics."""
+
+    try:
+        _encryption_key()
+    except BackupError:
+        return False
+    return True
+
+
 def encrypt_backup(payload: bytes) -> bytes:
     nonce = os.urandom(12)
     return BACKUP_MAGIC + nonce + AESGCM(_encryption_key()).encrypt(
