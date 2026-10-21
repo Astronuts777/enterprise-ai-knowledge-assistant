@@ -57,6 +57,18 @@ class AccountResponse(BaseModel):
     email_verified: bool
 
 
+class AuthSessionResponse(BaseModel):
+    id: UUID
+    client_label: str
+    is_current: bool
+    created_at: datetime
+    expires_at: datetime
+
+
+class RevokedSessionsResponse(BaseModel):
+    revoked_count: int
+
+
 class EmailAddressRequest(BaseModel):
     email: str = Field(min_length=5, max_length=254)
 

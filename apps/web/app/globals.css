@@ -503,7 +503,7 @@ button { cursor: pointer; }
 .assistant-guide li span { color: var(--muted); font-size: 0.62rem; line-height: 1.55; }
 
 .members-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
-.table-head, .member-row { align-items: center; display: grid; grid-template-columns: minmax(270px, 2fr) 1fr 0.8fr 0.6fr; padding: 0 1.3rem; }
+.table-head, .member-row { align-items: center; display: grid; grid-template-columns: minmax(250px, 2fr) 0.9fr 0.75fr 0.65fr 0.8fr; padding: 0 1.3rem; }
 .table-head { background: #f0f3f0; color: #7c8b85; font-size: 0.62rem; font-weight: 800; height: 42px; text-transform: uppercase; }
 .member-row { border-top: 1px solid #edf0ed; min-height: 76px; }
 .member-row > div { align-items: center; display: flex; gap: 0.75rem; }
@@ -514,6 +514,30 @@ button { cursor: pointer; }
 .role-pill { background: #eef3ed; border-radius: 2rem; color: #526c5d !important; justify-self: start; padding: 0.28rem 0.55rem; }
 .active-status { align-items: center; display: flex; gap: 0.4rem; }
 .active-status i { background: #74a659; border-radius: 50%; height: 0.4rem; width: 0.4rem; }
+.member-session-action { justify-self: start; }
+.member-session-action button { background: white; border: 1px solid #d6ded9; border-radius: 0.45rem; color: #8a5049; font-size: 0.62rem; font-weight: 750; padding: 0.45rem 0.55rem; }
+.member-session-action button:disabled { cursor: wait; opacity: 0.55; }
+
+.security-summary { align-items: center; background: var(--nav); border-radius: 0.85rem; color: white; display: flex; justify-content: space-between; margin-bottom: 1rem; padding: 1.2rem 1.35rem; }
+.security-summary > div { align-items: center; display: flex; gap: 0.8rem; }
+.security-summary > div > .icon { color: var(--accent); height: 1.5rem; width: 1.5rem; }
+.security-summary span { display: grid; }
+.security-summary b { font-size: 1.25rem; }
+.security-summary small { color: #a9bbb3; font-size: 0.6rem; }
+.security-summary p { color: #b7c6c0; font-size: 0.65rem; line-height: 1.6; margin: 0; max-width: 560px; }
+.session-list { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
+.session-list article { align-items: center; border-top: 1px solid #edf0ed; display: grid; gap: 1rem; grid-template-columns: minmax(250px, 1.5fr) 0.8fr 0.6fr; min-height: 88px; padding: 0 1.3rem; }
+.session-list article:first-child { border-top: 0; }
+.session-device { align-items: center; display: flex; gap: 0.8rem; }
+.session-device > i { align-items: center; background: #edf3e8; border-radius: 0.55rem; color: #55705e; display: flex; height: 2.6rem; justify-content: center; width: 2.6rem; }
+.session-device > span, .session-expiry { display: grid; gap: 0.2rem; }
+.session-device b { font-size: 0.76rem; }
+.session-device small, .session-expiry small { color: var(--muted); font-size: 0.6rem; }
+.session-expiry time { color: #53665d; font-size: 0.66rem; }
+.session-list article > button { background: white; border: 1px solid #d6ded9; border-radius: 0.5rem; color: #8a5049; font-size: 0.64rem; font-weight: 750; justify-self: end; padding: 0.55rem 0.7rem; }
+.session-list article > button:disabled { cursor: wait; opacity: 0.55; }
+.current-session { align-items: center; color: #527147; display: flex; font-size: 0.64rem; font-weight: 750; gap: 0.4rem; justify-self: end; }
+.current-session i { background: #74a659; border-radius: 50%; height: 0.42rem; width: 0.42rem; }
 
 .audit-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
 .audit-table-head, .audit-row { align-items: center; display: grid; gap: 0.8rem; grid-template-columns: minmax(230px, 1.6fr) 0.8fr 1fr 0.55fr 0.85fr; padding: 0 1.3rem; }
@@ -593,6 +617,10 @@ button { cursor: pointer; }
   .table-head { display: none; }
   .member-row { gap: 1rem; grid-template-columns: 1fr auto; padding: 1rem; }
   .member-row > span:nth-of-type(2), .member-row > span:nth-of-type(3) { display: none; }
+  .member-session-action { grid-column: 2; }
+  .security-summary { align-items: flex-start; flex-direction: column; gap: 0.8rem; }
+  .session-list article { grid-template-columns: 1fr auto; padding: 1rem; }
+  .session-expiry { display: none; }
   .document-table-head { display: none; }
   .document-row { gap: 0.65rem; grid-template-columns: 1fr auto; padding: 1rem; }
   .document-row > span { display: none; }

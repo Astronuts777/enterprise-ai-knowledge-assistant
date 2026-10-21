@@ -5,6 +5,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 import {
   ApiError,
   Account,
+  AccountSession,
   AuditEvent,
   Classification,
   DocumentContent,
@@ -27,6 +28,7 @@ import {
   loginAccount,
   listDocuments,
   listAuditEvents,
+  listAccountSessions,
   listMembers,
   listQuestionHistory,
   listSpaceMembers,
@@ -34,6 +36,9 @@ import {
   openBrowserSession,
   publishDocumentVersion,
   registerAccount,
+  revokeAccountSession,
+  revokeMemberSessions,
+  revokeOtherAccountSessions,
   removeSpaceMember,
   requestPasswordReset,
   resendVerification,
@@ -46,7 +51,7 @@ import {
   verifyEmail,
 } from "../lib/api";
 
-type View = "overview" | "assistant" | "spaces" | "documents" | "members" | "audit";
+type View = "overview" | "assistant" | "spaces" | "documents" | "members" | "audit" | "settings";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -69,6 +74,9 @@ const auditActionLabels: Record<string, string> = {
   "account.registered": "账号注册",
   "account.login": "账号登录",
   "account.logout": "安全退出",
+  "account.session_revoked": "撤销账号会话",
+  "account.sessions_revoked": "退出其他设备",
+  "account.sessions_revoked_by_admin": "管理员强制下线",
   "account.email_verified": "邮箱验证",
   "account.verification_requested": "请求验证邮件",
   "account.password_reset_requested": "请求密码重置",
@@ -147,6 +155,7 @@ export default function Dashboard() {
   const [documentsBySpace, setDocumentsBySpace] = useState<Record<string, DocumentSummary[]>>({});
   const [answers, setAnswers] = useState<KnowledgeAnswer[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [accountSessions, setAccountSessions] = useState<AccountSession[]>([]);
   const [activeSpace, setActiveSpace] = useState<Space | null>(null);
   const [members, setMembers] = useState<Membership[]>([]);
   const [spaceMembers, setSpaceMembers] = useState<SpaceMembership[]>([]);
@@ -297,6 +306,7 @@ export default function Dashboard() {
     setAnswers([]);
     setMembers([]);
     setAuditEvents([]);
+    setAccountSessions([]);
     setDocumentReader(null);
   }
 
@@ -529,6 +539,66 @@ export default function Dashboard() {
     }
   }
 
+  async function openSettings() {
+    if (!ACCOUNT_MODE) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      setAccountSessions(await listAccountSessions());
+      setView("settings");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取登录设备");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevokeSession(session: AccountSession) {
+    setBusy(true);
+    setNotice(null);
+    try {
+      await revokeAccountSession(session.id);
+      if (session.is_current) {
+        await handleLogout();
+        return;
+      }
+      setAccountSessions(await listAccountSessions());
+      setNotice("该设备的登录会话已撤销");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "撤销会话失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevokeOtherSessions() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await revokeOtherAccountSessions();
+      setAccountSessions(await listAccountSessions());
+      setNotice(result.revoked_count > 0 ? `已退出 ${result.revoked_count} 个其他设备` : "没有其他登录设备");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "退出其他设备失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevokeMemberSessions(userId: string) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await revokeMemberSessions(actorId, tenantId, userId);
+      setNotice(result.revoked_count > 0 ? `已强制退出该成员的 ${result.revoked_count} 个会话` : "该成员当前没有登录会话");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "强制下线失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(TENANT_KEY);
     setTenantId(null);
@@ -537,6 +607,7 @@ export default function Dashboard() {
     setDocumentsBySpace({});
     setAnswers([]);
     setAuditEvents([]);
+    setAccountSessions([]);
     setActiveSpace(null);
     setMembers([]);
     setDocumentReader(null);
@@ -616,7 +687,7 @@ export default function Dashboard() {
           ))}
           <p>系统</p>
           {actorMembership?.role === "enterprise_admin" && <button className={view === "audit" ? "active" : ""} onClick={openAudit}><Icon name="shield" />审计日志<em>{auditEvents.length}</em></button>}
-          <button className="disabled-nav" disabled><Icon name="settings" />企业设置<span>即将开放</span></button>
+          {ACCOUNT_MODE ? <button className={view === "settings" ? "active" : ""} onClick={openSettings}><Icon name="settings" />账号安全</button> : <button className="disabled-nav" disabled><Icon name="settings" />账号安全<span>账号模式</span></button>}
         </nav>
         <div className="sidebar-foot">
           <span className="security-dot" />权限隔离已启用
@@ -662,10 +733,13 @@ export default function Dashboard() {
             />
           )}
           {view === "members" && (
-            <MembersView members={members} actorId={actorId} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} />
+            <MembersView members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} />
           )}
           {view === "audit" && actorMembership?.role === "enterprise_admin" && (
             <AuditView events={auditEvents} />
+          )}
+          {view === "settings" && ACCOUNT_MODE && (
+            <AccountSecurityView sessions={accountSessions} busy={busy} onRevoke={handleRevokeSession} onRevokeOthers={handleRevokeOtherSessions} />
           )}
           <footer className="workspace-footer">企业 ID {shortId(tenant.id)}<button onClick={ACCOUNT_MODE ? handleLogout : resetDemo}>{ACCOUNT_MODE ? "安全退出" : "切换演示企业"}</button></footer>
         </div>
@@ -951,9 +1025,20 @@ function DocumentReader({ content, onClose }: { content: DocumentContent; onClos
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section aria-modal="true" className="dialog document-reader" role="dialog"><button aria-label="关闭文档" className="dialog-close" onClick={onClose}>×</button><p className="kicker">安全文档阅读器</p><h2>{content.document.title}</h2><div className="reader-meta"><span>{content.version.filename}</span><span>v{content.version.version_number}</span><span>{statusLabel}</span><span>{formatBytes(content.version.byte_size)}</span></div><div className="reader-content">{content.chunks.length === 0 ? <div className="reader-empty"><Icon name="file" /><p>这个版本没有可显示的解析内容。</p></div> : content.chunks.map((chunk) => <article key={chunk.id}><small>{formatLocator(chunk.locator)}</small><p>{chunk.text}</p></article>)}</div><footer><Icon name="shield" />内容已通过企业、空间和版本权限校验；本次查看已写入审计日志。</footer></section></div>;
 }
 
-function MembersView({ members, actorId, canManage, onAdd }: { members: Membership[]; actorId: string; canManage: boolean; onAdd: () => void }) {
+function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSessions }: { members: Membership[]; actorId: string; busy: boolean; canManage: boolean; onAdd: () => void; onRevokeSessions: (userId: string) => void }) {
   return <><div className="page-heading"><div><p className="kicker">访问控制</p><h1>成员与权限</h1><p>企业角色决定成员能够管理和访问哪些内容。</p></div>{canManage && <button className="primary-button" onClick={onAdd}><Icon name="plus" />添加成员</button>}</div>
-    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (ACCOUNT_MODE ? "当前账号" : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
+    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span><span>会话</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (ACCOUNT_MODE ? "当前账号" : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span><span className="member-session-action">{ACCOUNT_MODE && member.user_id !== actorId ? <button disabled={busy} onClick={() => onRevokeSessions(member.user_id)}>强制下线</button> : "当前设备"}</span></div>)}</section>}
+  </>;
+}
+
+function AccountSecurityView({ sessions, busy, onRevoke, onRevokeOthers }: { sessions: AccountSession[]; busy: boolean; onRevoke: (session: AccountSession) => void; onRevokeOthers: () => void }) {
+  const otherSessionCount = sessions.filter((session) => !session.is_current).length;
+  return <>
+    <div className="page-heading"><div><p className="kicker">账号安全</p><h1>登录设备与会话</h1><p>查看当前账号的有效登录会话，并立即撤销不认识的设备。</p></div><button className="secondary-button" disabled={busy || otherSessionCount === 0} onClick={onRevokeOthers}><Icon name="shield" />退出全部其他设备</button></div>
+    <section className="security-summary"><div><Icon name="shield" /><span><b>{sessions.length}</b><small>有效会话</small></span></div><p>系统只保留粗粒度浏览器和操作系统标签，不保存完整 User-Agent 或原始 IP 地址。会话最多持续 12 小时。</p></section>
+    <section className="session-list">
+      {sessions.map((session) => <article key={session.id}><div className="session-device"><i><Icon name="settings" /></i><span><b>{session.client_label}</b><small>{session.is_current ? "当前设备" : `登录于 ${formatAuditDate(session.created_at)}`}</small></span></div><div className="session-expiry"><small>有效期至</small><time dateTime={session.expires_at}>{formatAuditDate(session.expires_at)}</time></div>{session.is_current ? <span className="current-session"><i />正在使用</span> : <button disabled={busy} onClick={() => onRevoke(session)}>退出此设备</button>}</article>)}
+    </section>
   </>;
 }
 

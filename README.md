@@ -41,7 +41,7 @@
 - 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
 - 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
 - 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
-- 登录按账号和网络来源进行数据库级限流；多因素认证、企业 SSO、设备管理和异常检测尚未接入。
+- 登录按账号和网络来源进行数据库级限流；用户可查看并撤销登录设备，企业管理员可强制成员下线；多因素认证、企业 SSO 和异常检测尚未接入。
 - 当前语义检索在授权后的加密向量候选集中由应用计算，适合现阶段规模；数据库内 pgvector 检索仍在路线图中。
 - SCIM、OCR、云盘连接器、决策证据包、审批和审计导出仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
@@ -374,6 +374,9 @@ POST /v1/auth/register
 POST /v1/auth/login
 POST /v1/auth/logout
 GET  /v1/auth/me
+GET  /v1/auth/sessions
+DELETE /v1/auth/sessions
+DELETE /v1/auth/sessions/{session_id}
 POST /v1/auth/email/verify
 POST /v1/auth/email/resend
 POST /v1/auth/password/forgot
@@ -383,6 +386,7 @@ POST /v1/tenants
 GET  /v1/tenants/{tenant_id}
 POST /v1/tenants/{tenant_id}/members
 GET  /v1/tenants/{tenant_id}/members
+DELETE /v1/tenants/{tenant_id}/members/{user_id}/sessions
 POST /v1/tenants/{tenant_id}/invitations
 POST /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces
@@ -515,6 +519,7 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [x] 独立密钥加密的 PostgreSQL 备份与隔离恢复演练工具
 - [x] 数据库就绪检查、请求 ID、结构化访问日志与生产配置审计
 - [x] 基于空间最低权限和发布状态的安全文档阅读器
+- [x] 用户设备会话管理与企业管理员强制下线
 - [x] 授权后加密向量与关键词混合检索（当前规模）
 - [x] 可配置的大模型生成、严格结构化输出与引用校验
 - [ ] PostgreSQL pgvector 规模化检索与租户过滤召回评测

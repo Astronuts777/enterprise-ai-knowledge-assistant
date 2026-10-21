@@ -144,6 +144,14 @@ export type Account = {
   email_verified: boolean;
 };
 
+export type AccountSession = {
+  id: string;
+  client_label: string;
+  is_current: boolean;
+  created_at: string;
+  expires_at: string;
+};
+
 export type Invitation = {
   id: string;
   tenant_id: string;
@@ -226,6 +234,32 @@ export function loginAccount(email: string, password: string): Promise<Account> 
 
 export function logoutAccount(): Promise<void> {
   return accountRequest<void>("/v1/auth/logout", { method: "POST" });
+}
+
+export function listAccountSessions(): Promise<AccountSession[]> {
+  return accountRequest<AccountSession[]>("/v1/auth/sessions");
+}
+
+export function revokeAccountSession(sessionId: string): Promise<void> {
+  return accountRequest<void>(`/v1/auth/sessions/${sessionId}`, { method: "DELETE" });
+}
+
+export function revokeOtherAccountSessions(): Promise<{ revoked_count: number }> {
+  return accountRequest<{ revoked_count: number }>("/v1/auth/sessions", {
+    method: "DELETE",
+  });
+}
+
+export function revokeMemberSessions(
+  actorId: string,
+  tenantId: string,
+  userId: string,
+): Promise<{ revoked_count: number }> {
+  return request<{ revoked_count: number }>(
+    `/v1/tenants/${tenantId}/members/${userId}/sessions`,
+    actorId,
+    { method: "DELETE" },
+  );
 }
 
 export function verifyEmail(token: string): Promise<Account> {

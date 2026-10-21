@@ -55,6 +55,119 @@ def test_account_registration_login_and_server_side_logout() -> None:
     assert logged_in.status_code == 200
 
 
+def test_user_can_review_and_revoke_device_sessions() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    chrome_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
+        )
+    }
+    firefox_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/143.0"
+    }
+    with TestClient(app, headers=chrome_headers) as current, TestClient(
+        app, headers=firefox_headers
+    ) as other, TestClient(app) as revoked:
+        register(current, "devices@example.com", organization_name="Acme")
+        signed_in = other.post(
+            "/v1/auth/login",
+            json={"email": "devices@example.com", "password": PASSWORD},
+        )
+        assert signed_in.status_code == 200
+        other_cookie = other.cookies.get("enterprise_ai_session")
+        assert other_cookie
+        revoked.cookies.set("enterprise_ai_session", other_cookie)
+
+        sessions = current.get("/v1/auth/sessions")
+        other_session = next(item for item in sessions.json() if not item["is_current"])
+        removed = current.delete(f"/v1/auth/sessions/{other_session['id']}")
+        rejected = revoked.get("/v1/auth/me")
+        current_still_valid = current.get("/v1/auth/me")
+
+    assert sessions.status_code == 200
+    assert {item["client_label"] for item in sessions.json()} == {
+        "Chrome · macOS",
+        "Firefox · Windows",
+    }
+    assert sum(item["is_current"] for item in sessions.json()) == 1
+    assert removed.status_code == 204
+    assert rejected.status_code == 401
+    assert current_still_valid.status_code == 200
+
+
+def test_user_can_revoke_other_sessions_and_admin_can_force_member_logout() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    with (
+        TestClient(app) as admin,
+        TestClient(app) as second_admin_session,
+        TestClient(app) as member,
+    ):
+        owner = register(admin, "owner@example.com", organization_name="Acme")
+        tenant_id = owner["tenant_id"]
+        second_admin_session.post(
+            "/v1/auth/login",
+            json={"email": "owner@example.com", "password": PASSWORD},
+        )
+        revoked_others = admin.delete("/v1/auth/sessions")
+        second_rejected = second_admin_session.get("/v1/auth/me")
+
+        member_account = register(member, "member@example.com")
+        member_id = member_account["user_id"]
+        invitation = admin.post(
+            f"/v1/tenants/{tenant_id}/invitations",
+            json={"email": "member@example.com", "role": "member"},
+        )
+        accepted = member.post(
+            f"/v1/auth/invitations/{tenant_id}/accept",
+            json={"token": invitation.json()["invite_token"]},
+        )
+        forced = admin.delete(
+            f"/v1/tenants/{tenant_id}/members/{member_id}/sessions"
+        )
+        member_rejected = member.get("/v1/auth/me")
+        audit = admin.get(
+            f"/v1/tenants/{tenant_id}/audit-events?action="
+            "account.sessions_revoked_by_admin"
+        )
+
+    assert revoked_others.status_code == 200
+    assert revoked_others.json()["revoked_count"] == 1
+    assert second_rejected.status_code == 401
+    assert invitation.status_code == 201
+    assert accepted.status_code == 200
+    assert forced.status_code == 200
+    assert forced.json()["revoked_count"] == 1
+    assert member_rejected.status_code == 401
+    assert audit.status_code == 200
+    assert audit.json()[0]["resource_id"] == member_id
+    assert "email" not in str(audit.json()[0]["details"])
+
+
+def test_admin_cannot_revoke_account_active_in_another_tenant() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    with TestClient(app) as admin, TestClient(app) as external_owner:
+        owner = register(admin, "owner@example.com", organization_name="Acme")
+        external = register(
+            external_owner,
+            "external@example.com",
+            organization_name="External company",
+        )
+        saved = admin.post(
+            f"/v1/tenants/{owner['tenant_id']}/members",
+            json={"user_id": external["user_id"], "role": "member"},
+        )
+        refused = admin.delete(
+            f"/v1/tenants/{owner['tenant_id']}/members/"
+            f"{external['user_id']}/sessions"
+        )
+        still_active = external_owner.get("/v1/auth/me")
+
+    assert saved.status_code == 201
+    assert refused.status_code == 404
+    assert still_active.status_code == 200
+
+
 def test_invitation_only_grants_access_to_the_matching_account() -> None:
     sender = MemoryEmailSender()
     app = create_app("sqlite://", account_auth=True, email_sender=sender)

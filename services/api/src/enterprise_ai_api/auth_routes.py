@@ -35,12 +35,14 @@ from enterprise_ai_api.schemas import (
     AccountLogin,
     AccountRegister,
     AccountResponse,
+    AuthSessionResponse,
     EmailAddressRequest,
     GenericMessage,
     InvitationAccept,
     InvitationCreate,
     InvitationResponse,
     PasswordResetConfirm,
+    RevokedSessionsResponse,
     TokenRequest,
 )
 from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
@@ -83,12 +85,42 @@ def _set_session_cookie(request: Request, response: Response, token: str) -> Non
     )
 
 
-def _new_session(session: Session, user_id: UUID) -> str:
+def _client_label(request: Request) -> str:
+    """Return a coarse device label without retaining the raw user-agent or IP."""
+
+    user_agent = request.headers.get("user-agent", "")
+    if "Edg/" in user_agent:
+        browser = "Microsoft Edge"
+    elif "Firefox/" in user_agent:
+        browser = "Firefox"
+    elif "Chrome/" in user_agent or "CriOS/" in user_agent:
+        browser = "Chrome"
+    elif "Safari/" in user_agent:
+        browser = "Safari"
+    else:
+        browser = "Browser"
+    if "Windows" in user_agent:
+        platform = "Windows"
+    elif "Android" in user_agent:
+        platform = "Android"
+    elif "iPhone" in user_agent or "iPad" in user_agent:
+        platform = "iOS"
+    elif "Macintosh" in user_agent or "Mac OS X" in user_agent:
+        platform = "macOS"
+    elif "Linux" in user_agent:
+        platform = "Linux"
+    else:
+        platform = "Unknown device"
+    return f"{browser} · {platform}"
+
+
+def _new_session(session: Session, user_id: UUID, request: Request) -> str:
     token = new_token()
     session.add(
         AuthSession(
             user_id=user_id,
             token_hash=token_hash(token),
+            client_label=_client_label(request),
             expires_at=datetime.now(UTC) + SESSION_LIFETIME,
         )
     )
@@ -271,7 +303,7 @@ def register_account(
         if request.app.state.require_email_verification
         else None
     )
-    session_token = None if verification_token else _new_session(session, user.id)
+    session_token = None if verification_token else _new_session(session, user.id, request)
     try:
         session.commit()
     except IntegrityError as error:
@@ -351,7 +383,7 @@ def login_account(
             detail="Email verification required",
         )
     session.execute(delete(AuthAttempt).where(AuthAttempt.identity_hash == identity_hash))
-    token = _new_session(session, user.id)
+    token = _new_session(session, user.id, request)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         record_audit_event(
@@ -381,7 +413,7 @@ def verify_email(
     now = datetime.now(UTC)
     user.email_verified_at = now
     account_token.consumed_at = now
-    session_token = _new_session(session, user.id)
+    session_token = _new_session(session, user.id, request)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         record_audit_event(
@@ -495,7 +527,7 @@ def reset_password(
     user.email_verified_at = user.email_verified_at or now
     account_token.consumed_at = now
     session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
-    session_token = _new_session(session, user.id)
+    session_token = _new_session(session, user.id, request)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         record_audit_event(
@@ -528,6 +560,99 @@ def current_account(
     return _account_response(user)
 
 
+@router.get("/auth/sessions", response_model=list[AuthSessionResponse])
+def list_account_sessions(
+    request: Request,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> list[AuthSessionResponse]:
+    current_hash = token_hash(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    active_sessions = list(
+        session.scalars(
+            select(AuthSession)
+            .where(
+                AuthSession.user_id == user_id,
+                AuthSession.expires_at > datetime.now(UTC),
+            )
+            .order_by(AuthSession.created_at.desc(), AuthSession.id.desc())
+        )
+    )
+    return [
+        AuthSessionResponse(
+            id=auth_session.id,
+            client_label=auth_session.client_label,
+            is_current=auth_session.token_hash == current_hash,
+            created_at=auth_session.created_at,
+            expires_at=auth_session.expires_at,
+        )
+        for auth_session in active_sessions
+    ]
+
+
+@router.delete("/auth/sessions", response_model=RevokedSessionsResponse)
+def revoke_other_account_sessions(
+    request: Request,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> RevokedSessionsResponse:
+    current_hash = token_hash(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    other_sessions = list(
+        session.scalars(
+            select(AuthSession).where(
+                AuthSession.user_id == user_id,
+                AuthSession.token_hash != current_hash,
+            )
+        )
+    )
+    for auth_session in other_sessions:
+        session.delete(auth_session)
+    user = session.get(User, user_id)
+    if user is not None and user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user_id,
+            action="account.sessions_revoked",
+            resource_type="user",
+            resource_id=user_id,
+            details={"scope": "other_sessions", "revoked_count": len(other_sessions)},
+        )
+    session.commit()
+    return RevokedSessionsResponse(revoked_count=len(other_sessions))
+
+
+@router.delete("/auth/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_account_session(
+    session_id: UUID,
+    request: Request,
+    response: Response,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> None:
+    auth_session = session.get(AuthSession, session_id)
+    if auth_session is None or auth_session.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    current_hash = token_hash(request.cookies.get(SESSION_COOKIE_NAME, ""))
+    is_current = auth_session.token_hash == current_hash
+    session.delete(auth_session)
+    user = session.get(User, user_id)
+    if user is not None and user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user_id,
+            action="account.session_revoked",
+            resource_type="auth_session",
+            resource_id=session_id,
+            details={"current_session": is_current},
+        )
+    session.commit()
+    if is_current:
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout_account(request: Request, response: Response, session: DatabaseSession) -> None:
     token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -550,6 +675,51 @@ def logout_account(request: Request, response: Response, session: DatabaseSessio
                 )
             session.commit()
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+@router.delete(
+    "/tenants/{tenant_id}/members/{target_user_id}/sessions",
+    response_model=RevokedSessionsResponse,
+)
+def revoke_member_sessions(
+    tenant_id: UUID,
+    target_user_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> RevokedSessionsResponse:
+    authorize_tenant_action(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.MANAGE_MEMBERS,
+    )
+    membership = session.get(Membership, (tenant_id, target_user_id))
+    target_user = session.get(User, target_user_id)
+    if (
+        membership is None
+        or target_user is None
+        or target_user.default_tenant_id != tenant_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    target_sessions = list(
+        session.scalars(select(AuthSession).where(AuthSession.user_id == target_user_id))
+    )
+    for auth_session in target_sessions:
+        session.delete(auth_session)
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="account.sessions_revoked_by_admin",
+        resource_type="user",
+        resource_id=target_user_id,
+        details={"revoked_count": len(target_sessions)},
+    )
+    session.commit()
+    return RevokedSessionsResponse(revoked_count=len(target_sessions))
 
 
 @router.post(
