@@ -14,14 +14,15 @@
 当前版本已经打通一条可操作的企业知识闭环：
 
 1. 使用邮箱和密码注册，创建独立企业工作区，创建者自动成为企业管理员。
-2. 由管理员向指定邮箱签发限时、一次性邀请，成员不能通过输入企业名称自行加入。
-3. 按部门、项目或业务主题创建知识空间，并设置内部、机密或严格受限等级。
-4. 为受邀成员分配企业管理员、知识管理员或普通成员角色。
-5. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
-6. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
-7. 只针对已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
-8. 在资料不足时明确拒答，不用没有来源的内容补全答案。
-9. 保存当前用户自己的问答历史，并阻止跨企业读取数据。
+2. 通过验证邮件激活邮箱；支持忘记密码和限时、一次性的安全重置链接。
+3. 由管理员向指定邮箱发送限时、一次性邀请，成员不能通过输入企业名称自行加入。
+4. 按部门、项目或业务主题创建知识空间，并设置内部、机密或严格受限等级。
+5. 为受邀成员分配企业角色，并为每个知识空间单独授予只读者或管理员权限。
+6. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
+7. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
+8. 只针对当前用户获准访问的已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
+9. 在资料不足时明确拒答，不用没有来源的内容补全答案。
+10. 保存当前用户自己的问答历史，并阻止跨企业、跨空间读取数据。
 
 适合用来验证以下场景：
 
@@ -36,7 +37,8 @@
 - 问答使用透明、可重复的本地关键词检索和原文摘录，尚未调用外部大模型。
 - 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
 - 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
-- 当前管理员需要手动把邀请链接安全地发送给成员；自动邮件验证、密码重置和企业 SSO 尚未接入。
+- 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
+- 登录按账号和网络来源进行数据库级限流；多因素认证、企业 SSO、设备管理和异常检测尚未接入。
 - SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和完整审计仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
@@ -315,6 +317,13 @@ S3 兼容服务，而不改变业务数据模型。
 | --- | --- | --- |
 | `APP_ENV` | 环境标识 | `development` |
 | `ACCOUNT_AUTH_MODE` | 启用邮箱密码账号、服务端会话和企业邀请 | `false` |
+| `APP_PUBLIC_URL` | 验证、重置和邀请邮件中的 Web 根地址 | `http://localhost:3000` |
+| `REQUIRE_EMAIL_VERIFICATION` | 注册后是否必须验证邮箱才能登录 | `false` |
+| `EMAIL_DELIVERY_BACKEND` | 邮件后端：`disabled` 或 `smtp` | `disabled` |
+| `SMTP_HOST` / `SMTP_PORT` | SMTP 服务地址和端口 | 无 / `587` |
+| `SMTP_FROM_EMAIL` | 验证、重置和邀请邮件的发件地址 | 无 |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | 可选 SMTP 登录凭据 | 无 |
+| `SMTP_USE_TLS` / `SMTP_USE_SSL` | STARTTLS 或隐式 TLS；不能同时启用 | `true` / `false` |
 | `ENCRYPTION_MASTER_KEY` | 数据字段、令牌摘要和上传文件的主密钥 | 本地使用开发密钥；公网必须设置 |
 | `DATABASE_URL` | API 运行数据库 | 本地 SQLite |
 | `MIGRATION_DATABASE_URL` | Alembic 迁移数据库 | `alembic.ini` 中的本地 PostgreSQL |
@@ -344,6 +353,10 @@ POST /v1/auth/register
 POST /v1/auth/login
 POST /v1/auth/logout
 GET  /v1/auth/me
+POST /v1/auth/email/verify
+POST /v1/auth/email/resend
+POST /v1/auth/password/forgot
+POST /v1/auth/password/reset
 POST /v1/auth/invitations/{tenant_id}/accept
 POST /v1/tenants
 GET  /v1/tenants/{tenant_id}
@@ -352,6 +365,9 @@ GET  /v1/tenants/{tenant_id}/members
 POST /v1/tenants/{tenant_id}/invitations
 POST /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces
+GET  /v1/tenants/{tenant_id}/spaces/{space_id}/members
+POST /v1/tenants/{tenant_id}/spaces/{space_id}/members
+DELETE /v1/tenants/{tenant_id}/spaces/{space_id}/members/{user_id}
 POST /v1/tenants/{tenant_id}/spaces/{space_id}/documents
 GET  /v1/tenants/{tenant_id}/spaces/{space_id}/documents
 GET  /v1/tenants/{tenant_id}/documents/{document_id}
@@ -443,7 +459,8 @@ curl -X POST http://localhost:8000/v1/tenants \
 - [x] SQLite 本地开发与 PostgreSQL 演示部署
 - [x] 邮箱密码账号、服务端会话和限时企业邀请
 - [x] 敏感数据库字段与上传原件的 AES-256-GCM 加密
-- [ ] 邮箱验证、密码重置、邀请邮件和登录限流
+- [x] 邮箱验证、密码重置、邀请邮件和数据库级登录限流
+- [x] 知识空间只读者/管理员 ACL 与检索隔离
 - [ ] pgvector 关键词与语义混合检索
 - [ ] 可配置的大模型生成与引用校验
 - [ ] 决策证据包、人工审批和审计事件

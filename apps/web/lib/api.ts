@@ -24,6 +24,16 @@ export type Space = {
   created_at: string;
 };
 
+export type SpaceRole = "manager" | "viewer";
+
+export type SpaceMembership = {
+  tenant_id: string;
+  space_id: string;
+  user_id: string;
+  role: SpaceRole;
+  created_at: string;
+};
+
 export type DocumentStatus = "ready" | "published" | "superseded" | "failed";
 
 export type KnowledgeDocument = {
@@ -101,6 +111,7 @@ export type Account = {
   user_id: string;
   email: string;
   tenant_id: string | null;
+  email_verified: boolean;
 };
 
 export type Invitation = {
@@ -110,6 +121,7 @@ export type Invitation = {
   role: MembershipRole;
   expires_at: string;
   invite_token: string;
+  delivery_status: "sent" | "manual";
 };
 
 export class ApiError extends Error {
@@ -141,7 +153,7 @@ async function request<T>(path: string, actorId: string, init?: RequestInit): Pr
   if (!response.ok) {
     throw await apiError(response);
   }
-
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -184,6 +196,34 @@ export function loginAccount(email: string, password: string): Promise<Account> 
 
 export function logoutAccount(): Promise<void> {
   return accountRequest<void>("/v1/auth/logout", { method: "POST" });
+}
+
+export function verifyEmail(token: string): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/email/verify", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function resendVerification(email: string): Promise<{ message: string }> {
+  return accountRequest<{ message: string }>("/v1/auth/email/resend", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function requestPasswordReset(email: string): Promise<{ message: string }> {
+  return accountRequest<{ message: string }>("/v1/auth/password/forgot", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function resetPassword(token: string, password: string): Promise<Account> {
+  return accountRequest<Account>("/v1/auth/password/reset", {
+    method: "POST",
+    body: JSON.stringify({ token, password }),
+  });
 }
 
 export function createInvitation(
@@ -239,6 +279,43 @@ export function createSpace(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function listSpaceMembers(
+  actorId: string,
+  tenantId: string,
+  spaceId: string,
+): Promise<SpaceMembership[]> {
+  return request<SpaceMembership[]>(
+    `/v1/tenants/${tenantId}/spaces/${spaceId}/members`,
+    actorId,
+  );
+}
+
+export function saveSpaceMember(
+  actorId: string,
+  tenantId: string,
+  spaceId: string,
+  input: { user_id: string; role: SpaceRole },
+): Promise<SpaceMembership> {
+  return request<SpaceMembership>(
+    `/v1/tenants/${tenantId}/spaces/${spaceId}/members`,
+    actorId,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function removeSpaceMember(
+  actorId: string,
+  tenantId: string,
+  spaceId: string,
+  userId: string,
+): Promise<void> {
+  return request<void>(
+    `/v1/tenants/${tenantId}/spaces/${spaceId}/members/${userId}`,
+    actorId,
+    { method: "DELETE" },
+  );
 }
 
 export function listMembers(actorId: string, tenantId: string): Promise<Membership[]> {

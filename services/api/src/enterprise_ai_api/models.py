@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -42,6 +43,7 @@ class User(Base):
         ForeignKey("tenants.id", ondelete="SET NULL")
     )
     status: Mapped[str] = mapped_column(String(32), default="active")
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -55,6 +57,37 @@ class AuthSession(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountToken(Base):
+    __tablename__ = "account_tokens"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('email_verification', 'password_reset')",
+            name="ck_account_tokens_purpose",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(32), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuthAttempt(Base):
+    __tablename__ = "auth_attempts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    identity_hash: Mapped[str] = mapped_column(String(64), index=True)
+    network_hash: Mapped[str] = mapped_column(String(64), index=True)
+    attempted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class Invitation(Base):
@@ -97,6 +130,7 @@ class Space(Base):
     __tablename__ = "spaces"
     __table_args__ = (
         UniqueConstraint("tenant_id", "name", name="uq_spaces_tenant_name"),
+        UniqueConstraint("tenant_id", "id", name="uq_spaces_tenant_id_id"),
         CheckConstraint(
             "classification IN ('internal', 'confidential', 'restricted')",
             name="ck_spaces_classification",
@@ -109,6 +143,32 @@ class Space(Base):
     )
     name: Mapped[str] = mapped_column(String(160))
     classification: Mapped[str] = mapped_column(String(32), default="internal")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SpaceMembership(Base):
+    __tablename__ = "space_memberships"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('manager', 'viewer')",
+            name="ck_space_memberships_role",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "space_id"],
+            ["spaces.tenant_id", "spaces.id"],
+            ondelete="CASCADE",
+            name="fk_space_memberships_space",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    space_id: Mapped[UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

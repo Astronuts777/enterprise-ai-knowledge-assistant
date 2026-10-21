@@ -11,6 +11,13 @@ services:
         value: production
       - key: ACCOUNT_AUTH_MODE
         value: "true"
+      - key: APP_PUBLIC_URL
+        value: https://enterprise-ai-knowledge-assistant-y39d.onrender.com
+      # Enable only after SMTP_* secrets have been configured in Render.
+      - key: REQUIRE_EMAIL_VERIFICATION
+        value: "false"
+      - key: EMAIL_DELIVERY_BACKEND
+        value: disabled
       - key: PUBLIC_DEMO_MODE
         value: "false"
       - key: ENCRYPTION_MASTER_KEY

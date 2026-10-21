@@ -1,12 +1,14 @@
 """Password account, server-side session, and invitation endpoints."""
 
 import re
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -18,14 +20,27 @@ from enterprise_ai_api.crypto import (
     token_hash,
 )
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import AuthSession, Invitation, Membership, Tenant, User
+from enterprise_ai_api.email_delivery import EmailDeliveryError, EmailSender
+from enterprise_ai_api.models import (
+    AccountToken,
+    AuthAttempt,
+    AuthSession,
+    Invitation,
+    Membership,
+    Tenant,
+    User,
+)
 from enterprise_ai_api.schemas import (
     AccountLogin,
     AccountRegister,
     AccountResponse,
+    EmailAddressRequest,
+    GenericMessage,
     InvitationAccept,
     InvitationCreate,
     InvitationResponse,
+    PasswordResetConfirm,
+    TokenRequest,
 )
 from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
 from enterprise_ai_core.security import Action
@@ -35,6 +50,12 @@ DatabaseSession = Annotated[Session, Depends(get_session)]
 SESSION_COOKIE_NAME = "enterprise_ai_session"
 SESSION_LIFETIME = timedelta(hours=12)
 INVITATION_LIFETIME = timedelta(days=7)
+VERIFICATION_LIFETIME = timedelta(hours=24)
+PASSWORD_RESET_LIFETIME = timedelta(minutes=30)
+LOGIN_WINDOW = timedelta(minutes=15)
+MAX_LOGIN_FAILURES = 5
+MAX_NETWORK_LOGIN_FAILURES = 50
+EMAIL_SEND_COOLDOWN = timedelta(minutes=1)
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -80,6 +101,118 @@ def _account_response(user: User) -> AccountResponse:
         user_id=user.id,
         email=user.email_ciphertext,
         tenant_id=user.default_tenant_id,
+        email_verified=user.email_verified_at is not None,
+    )
+
+
+def _issue_account_token(session: Session, user_id: UUID, purpose: str) -> str:
+    session.execute(
+        delete(AccountToken).where(
+            AccountToken.user_id == user_id,
+            AccountToken.purpose == purpose,
+            AccountToken.consumed_at.is_(None),
+        )
+    )
+    raw_token = new_token()
+    lifetime = VERIFICATION_LIFETIME if purpose == "email_verification" else PASSWORD_RESET_LIFETIME
+    session.add(
+        AccountToken(
+            user_id=user_id,
+            purpose=purpose,
+            token_hash=token_hash(raw_token),
+            expires_at=datetime.now(UTC) + lifetime,
+        )
+    )
+    return raw_token
+
+
+def _valid_account_token(session: Session, raw_token: str, purpose: str) -> AccountToken:
+    account_token = session.scalar(
+        select(AccountToken).where(
+            AccountToken.token_hash == token_hash(raw_token),
+            AccountToken.purpose == purpose,
+            AccountToken.consumed_at.is_(None),
+        ).with_for_update()
+    )
+    if account_token is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
+    expires_at = account_token.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Token has expired")
+    return account_token
+
+
+def _send_verification_email(
+    sender: EmailSender, *, recipient: str, public_url: str, raw_token: str
+) -> None:
+    link = f"{public_url}/?{urlencode({'mode': 'verify', 'token': raw_token})}"
+    sender.send(
+        recipient=recipient,
+        subject="验证你的 Enterprise AI 邮箱",
+        text=(
+            f"请在 24 小时内打开以下链接完成邮箱验证：\n\n{link}\n\n"
+            "如果不是你本人操作，请忽略此邮件。"
+        ),
+    )
+
+
+def _send_password_reset_email(
+    sender: EmailSender, *, recipient: str, public_url: str, raw_token: str
+) -> None:
+    link = f"{public_url}/?{urlencode({'mode': 'reset', 'token': raw_token})}"
+    sender.send(
+        recipient=recipient,
+        subject="重置你的 Enterprise AI 密码",
+        text=(
+            f"请在 30 分钟内打开以下链接重置密码：\n\n{link}\n\n"
+            "如果不是你本人操作，请忽略此邮件。"
+        ),
+    )
+
+
+def _login_hashes(request: Request, email_hash: str) -> tuple[str, str]:
+    host = request.client.host if request.client else "unknown"
+    return email_hash, token_hash(f"login-network:{host}")
+
+
+def _enforce_login_limit(session: Session, identity_hash: str, network_hash: str) -> None:
+    cutoff = datetime.now(UTC) - LOGIN_WINDOW
+    identity_failures = session.scalar(
+        select(func.count(AuthAttempt.id)).where(
+            AuthAttempt.attempted_at >= cutoff,
+            AuthAttempt.identity_hash == identity_hash,
+        )
+    )
+    network_failures = session.scalar(
+        select(func.count(AuthAttempt.id)).where(
+            AuthAttempt.attempted_at >= cutoff,
+            AuthAttempt.network_hash == network_hash,
+        )
+    )
+    if (identity_failures or 0) >= MAX_LOGIN_FAILURES or (
+        network_failures or 0
+    ) >= MAX_NETWORK_LOGIN_FAILURES:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Try again later",
+            headers={"Retry-After": str(int(LOGIN_WINDOW.total_seconds()))},
+        )
+
+
+def _recent_token_exists(session: Session, user_id: UUID, purpose: str) -> bool:
+    cutoff = datetime.now(UTC) - EMAIL_SEND_COOLDOWN
+    return (
+        session.scalar(
+            select(AccountToken.id).where(
+                AccountToken.user_id == user_id,
+                AccountToken.purpose == purpose,
+                AccountToken.created_at >= cutoff,
+                AccountToken.consumed_at.is_(None),
+            )
+        )
+        is not None
     )
 
 
@@ -103,6 +236,9 @@ def register_account(
         email_ciphertext=email,
         email_lookup_hash=email_hash,
         password_hash=password_hash(payload.password),
+        email_verified_at=(
+            None if request.app.state.require_email_verification else datetime.now(UTC)
+        ),
     )
     session.add(user)
     session.flush()
@@ -117,7 +253,12 @@ def register_account(
         )
         user.default_tenant_id = tenant.id
 
-    token = _new_session(session, user.id)
+    verification_token = (
+        _issue_account_token(session, user.id, "email_verification")
+        if request.app.state.require_email_verification
+        else None
+    )
+    session_token = None if verification_token else _new_session(session, user.id)
     try:
         session.commit()
     except IntegrityError as error:
@@ -126,7 +267,21 @@ def register_account(
             status_code=status.HTTP_409_CONFLICT,
             detail="Account already exists",
         ) from error
-    _set_session_cookie(request, response, token)
+    if verification_token:
+        try:
+            _send_verification_email(
+                request.app.state.email_sender,
+                recipient=email,
+                public_url=request.app.state.public_url,
+                raw_token=verification_token,
+            )
+        except EmailDeliveryError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Account created, but verification email delivery failed. Try resend",
+            ) from error
+    elif session_token:
+        _set_session_cookie(request, response, session_token)
     return _account_response(user)
 
 
@@ -140,6 +295,8 @@ def login_account(
     if not request.app.state.account_auth:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     email_hash = blind_index(_normalize_email(payload.email))
+    identity_hash, network_hash = _login_hashes(request, email_hash)
+    _enforce_login_limit(session, identity_hash, network_hash)
     user = session.scalar(select(User).where(User.email_lookup_hash == email_hash))
     if (
         user is None
@@ -147,10 +304,122 @@ def login_account(
         or not password_matches(payload.password, user.password_hash)
         or user.status != "active"
     ):
+        session.add(AuthAttempt(identity_hash=identity_hash, network_hash=network_hash))
+        session.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    if request.app.state.require_email_verification and user.email_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email verification required",
+        )
+    session.execute(delete(AuthAttempt).where(AuthAttempt.identity_hash == identity_hash))
     token = _new_session(session, user.id)
     session.commit()
     _set_session_cookie(request, response, token)
+    return _account_response(user)
+
+
+@router.post("/auth/email/verify", response_model=AccountResponse)
+def verify_email(
+    payload: TokenRequest,
+    request: Request,
+    response: Response,
+    session: DatabaseSession,
+) -> AccountResponse:
+    account_token = _valid_account_token(session, payload.token, "email_verification")
+    user = session.get(User, account_token.user_id)
+    if user is None or user.status != "active":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
+    now = datetime.now(UTC)
+    user.email_verified_at = now
+    account_token.consumed_at = now
+    session_token = _new_session(session, user.id)
+    session.commit()
+    _set_session_cookie(request, response, session_token)
+    return _account_response(user)
+
+
+@router.post("/auth/email/resend", response_model=GenericMessage)
+def resend_verification(
+    payload: EmailAddressRequest,
+    request: Request,
+    session: DatabaseSession,
+) -> GenericMessage:
+    if not request.app.state.email_sender.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email delivery is not configured",
+        )
+    email = _normalize_email(payload.email)
+    user = session.scalar(select(User).where(User.email_lookup_hash == blind_index(email)))
+    if (
+        user is not None
+        and user.email_verified_at is None
+        and request.app.state.email_sender.enabled
+        and not _recent_token_exists(session, user.id, "email_verification")
+    ):
+        raw_token = _issue_account_token(session, user.id, "email_verification")
+        session.commit()
+        with suppress(EmailDeliveryError):
+            _send_verification_email(
+                request.app.state.email_sender,
+                recipient=email,
+                public_url=request.app.state.public_url,
+                raw_token=raw_token,
+            )
+    return GenericMessage(message="If the account requires verification, an email was sent")
+
+
+@router.post("/auth/password/forgot", response_model=GenericMessage)
+def forgot_password(
+    payload: EmailAddressRequest,
+    request: Request,
+    session: DatabaseSession,
+) -> GenericMessage:
+    if not request.app.state.email_sender.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email delivery is not configured",
+        )
+    email = _normalize_email(payload.email)
+    user = session.scalar(select(User).where(User.email_lookup_hash == blind_index(email)))
+    if (
+        user is not None
+        and user.status == "active"
+        and request.app.state.email_sender.enabled
+        and not _recent_token_exists(session, user.id, "password_reset")
+    ):
+        raw_token = _issue_account_token(session, user.id, "password_reset")
+        session.commit()
+        with suppress(EmailDeliveryError):
+            _send_password_reset_email(
+                request.app.state.email_sender,
+                recipient=email,
+                public_url=request.app.state.public_url,
+                raw_token=raw_token,
+            )
+    return GenericMessage(message="If the account exists, a reset email was sent")
+
+
+@router.post("/auth/password/reset", response_model=AccountResponse)
+def reset_password(
+    payload: PasswordResetConfirm,
+    request: Request,
+    response: Response,
+    session: DatabaseSession,
+) -> AccountResponse:
+    account_token = _valid_account_token(session, payload.token, "password_reset")
+    user = session.get(User, account_token.user_id)
+    if user is None or user.status != "active":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
+    now = datetime.now(UTC)
+    user.password_hash = password_hash(payload.password)
+    user.email_verified_at = user.email_verified_at or now
+    account_token.consumed_at = now
+    session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+    session_token = _new_session(session, user.id)
+    session.commit()
+    _set_session_cookie(request, response, session_token)
     return _account_response(user)
 
 
@@ -192,6 +461,7 @@ def logout_account(request: Request, response: Response, session: DatabaseSessio
 def create_invitation(
     tenant_id: UUID,
     payload: InvitationCreate,
+    request: Request,
     user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> InvitationResponse:
@@ -216,6 +486,19 @@ def create_invitation(
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(invitation)
+    delivery_status = "manual"
+    if request.app.state.email_sender.enabled:
+        query = urlencode({"tenant": str(tenant_id), "invite": raw_token})
+        link = f"{request.app.state.public_url}/?{query}"
+        try:
+            request.app.state.email_sender.send(
+                recipient=email,
+                subject="你已受邀加入 Enterprise AI 企业工作区",
+                text=f"管理员邀请你加入企业知识工作区。请在 7 天内打开：\n\n{link}",
+            )
+            delivery_status = "sent"
+        except EmailDeliveryError:
+            delivery_status = "manual"
     return InvitationResponse(
         id=invitation.id,
         tenant_id=tenant_id,
@@ -223,6 +506,7 @@ def create_invitation(
         role=invitation.role,
         expires_at=invitation.expires_at,
         invite_token=raw_token,
+        delivery_status=delivery_status,
     )
 
 
@@ -254,6 +538,11 @@ def accept_invitation(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invitation is for another account",
+        )
+    if user.email_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verify the invited email before accepting the invitation",
         )
     membership = session.get(Membership, (tenant_id, user_id))
     if membership is None:

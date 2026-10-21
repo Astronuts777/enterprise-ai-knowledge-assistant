@@ -9,17 +9,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import Membership, Space, Tenant
+from enterprise_ai_api.models import Membership, Space, SpaceMembership, Tenant
 from enterprise_ai_api.schemas import (
     MembershipCreate,
     MembershipResponse,
     SpaceCreate,
+    SpaceMembershipCreate,
+    SpaceMembershipResponse,
     SpaceResponse,
     TenantCreate,
     TenantResponse,
 )
 from enterprise_ai_api.tenancy import (
     CurrentUserId,
+    accessible_space_ids,
+    authorize_space_access,
     authorize_tenant_action,
     ensure_development_user,
 )
@@ -136,6 +140,15 @@ def create_space(
     )
     session.add(space)
     try:
+        session.flush()
+        session.add(
+            SpaceMembership(
+                tenant_id=tenant_id,
+                space_id=space.id,
+                user_id=user_id,
+                role="manager",
+            )
+        )
         session.commit()
     except IntegrityError as error:
         session.rollback()
@@ -156,8 +169,133 @@ def list_spaces(tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSessio
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
+    allowed_ids = accessible_space_ids(
+        session, tenant_id=tenant_id, user_id=user_id
+    )
+    if not allowed_ids:
+        return []
     return list(
         session.scalars(
-            select(Space).where(Space.tenant_id == tenant_id).order_by(Space.created_at, Space.id)
+            select(Space)
+            .where(Space.tenant_id == tenant_id, Space.id.in_(allowed_ids))
+            .order_by(Space.created_at, Space.id)
         )
     )
+
+
+@router.get(
+    "/tenants/{tenant_id}/spaces/{space_id}/members",
+    response_model=list[SpaceMembershipResponse],
+)
+def list_space_members(
+    tenant_id: UUID,
+    space_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> list[SpaceMembership]:
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE
+    )
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+        manage=True,
+    )
+    return list(
+        session.scalars(
+            select(SpaceMembership)
+            .where(
+                SpaceMembership.tenant_id == tenant_id,
+                SpaceMembership.space_id == space_id,
+            )
+            .order_by(SpaceMembership.created_at, SpaceMembership.user_id)
+        )
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/spaces/{space_id}/members",
+    response_model=SpaceMembershipResponse,
+)
+def save_space_member(
+    tenant_id: UUID,
+    space_id: UUID,
+    payload: SpaceMembershipCreate,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> SpaceMembership:
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE
+    )
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+        manage=True,
+    )
+    target_membership = session.get(Membership, (tenant_id, payload.user_id))
+    if target_membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    grant = session.get(SpaceMembership, (tenant_id, space_id, payload.user_id))
+    if grant is None:
+        grant = SpaceMembership(
+            tenant_id=tenant_id,
+            space_id=space_id,
+            user_id=payload.user_id,
+            role=payload.role,
+        )
+        session.add(grant)
+    else:
+        grant.role = payload.role
+    session.commit()
+    set_tenant_context(session, tenant_id)
+    session.refresh(grant)
+    return grant
+
+
+@router.delete(
+    "/tenants/{tenant_id}/spaces/{space_id}/members/{target_user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_space_member(
+    tenant_id: UUID,
+    space_id: UUID,
+    target_user_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> None:
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE
+    )
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+        manage=True,
+    )
+    grant = session.get(SpaceMembership, (tenant_id, space_id, target_user_id))
+    if grant is not None:
+        if target_user_id == user_id:
+            managers = list(
+                session.scalars(
+                    select(SpaceMembership).where(
+                        SpaceMembership.tenant_id == tenant_id,
+                        SpaceMembership.space_id == space_id,
+                        SpaceMembership.role == "manager",
+                    )
+                )
+            )
+            if len(managers) <= 1:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The last space manager cannot remove their own access",
+                )
+        session.delete(grant)
+        session.commit()

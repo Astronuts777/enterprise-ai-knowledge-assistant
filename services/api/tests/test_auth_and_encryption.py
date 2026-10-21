@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from alembic import command
 from alembic.config import Config
@@ -6,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from enterprise_ai_api.crypto import FILE_MAGIC, decrypt_bytes
+from enterprise_ai_api.email_delivery import MemoryEmailSender
 from enterprise_ai_api.main import create_app
 
 PASSWORD = "correct horse battery staple"
@@ -54,7 +56,8 @@ def test_account_registration_login_and_server_side_logout() -> None:
 
 
 def test_invitation_only_grants_access_to_the_matching_account() -> None:
-    app = create_app("sqlite://", account_auth=True)
+    sender = MemoryEmailSender()
+    app = create_app("sqlite://", account_auth=True, email_sender=sender)
     with TestClient(app) as admin, TestClient(app) as invited, TestClient(app) as outsider:
         owner = register(admin, "owner@example.com", organization_name="Acme")
         tenant_id = owner["tenant_id"]
@@ -63,7 +66,10 @@ def test_invitation_only_grants_access_to_the_matching_account() -> None:
             json={"email": "member@example.com", "role": "member"},
         )
         assert invitation.status_code == 201
+        assert invitation.json()["delivery_status"] == "sent"
+        assert sender.messages[-1].recipient == "member@example.com"
         token = invitation.json()["invite_token"]
+        assert token in sender.messages[-1].text
 
         register(invited, "member@example.com")
         accepted = invited.post(
@@ -82,6 +88,104 @@ def test_invitation_only_grants_access_to_the_matching_account() -> None:
     assert accepted.json()["tenant_id"] == tenant_id
     assert member_read.status_code == 200
     assert outsider_accept.status_code in {403, 404}
+
+
+def token_from_latest_email(sender: MemoryEmailSender) -> str:
+    link = next(line for line in sender.messages[-1].text.splitlines() if line.startswith("http"))
+    return parse_qs(urlparse(link).query)["token"][0]
+
+
+def test_email_verification_creates_session_only_after_token_is_consumed() -> None:
+    sender = MemoryEmailSender()
+    app = create_app(
+        "sqlite://",
+        account_auth=True,
+        email_sender=sender,
+        require_email_verification=True,
+    )
+    with TestClient(app) as client:
+        registered = client.post(
+            "/v1/auth/register",
+            json={
+                "email": "verified@example.com",
+                "password": PASSWORD,
+                "organization_name": "Verified Acme",
+            },
+        )
+        before = client.get("/v1/auth/me")
+        verified = client.post(
+            "/v1/auth/email/verify",
+            json={"token": token_from_latest_email(sender)},
+        )
+        reused = client.post(
+            "/v1/auth/email/verify",
+            json={"token": token_from_latest_email(sender)},
+        )
+        after = client.get("/v1/auth/me")
+
+    assert registered.status_code == 201
+    assert registered.json()["email_verified"] is False
+    assert before.status_code == 401
+    assert verified.status_code == 200
+    assert verified.json()["email_verified"] is True
+    assert reused.status_code == 400
+    assert after.status_code == 200
+
+
+def test_password_reset_email_is_generic_and_revokes_previous_sessions() -> None:
+    sender = MemoryEmailSender()
+    app = create_app("sqlite://", account_auth=True, email_sender=sender)
+    with TestClient(app) as client, TestClient(app) as old_session:
+        register(client, "reset@example.com", organization_name="Acme")
+        old_cookie = client.cookies.get("enterprise_ai_session")
+        assert old_cookie
+        old_session.cookies.set("enterprise_ai_session", old_cookie)
+        unknown = client.post(
+            "/v1/auth/password/forgot", json={"email": "unknown@example.com"}
+        )
+        requested = client.post(
+            "/v1/auth/password/forgot", json={"email": "reset@example.com"}
+        )
+        reset = client.post(
+            "/v1/auth/password/reset",
+            json={"token": token_from_latest_email(sender), "password": "new secure password 123"},
+        )
+        new_cookie = client.cookies.get("enterprise_ai_session")
+        revoked_session = old_session.get("/v1/auth/me")
+        old_login = client.post(
+            "/v1/auth/login",
+            json={"email": "reset@example.com", "password": PASSWORD},
+        )
+        new_login = client.post(
+            "/v1/auth/login",
+            json={"email": "reset@example.com", "password": "new secure password 123"},
+        )
+
+    assert unknown.status_code == requested.status_code == 200
+    assert unknown.json() == requested.json()
+    assert reset.status_code == 200
+    assert old_cookie != new_cookie
+    assert revoked_session.status_code == 401
+    assert old_login.status_code == 401
+    assert new_login.status_code == 200
+
+
+def test_login_is_rate_limited_after_repeated_failures() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    with TestClient(app) as client:
+        register(client, "limited@example.com")
+        client.post("/v1/auth/logout")
+        failures = [
+            client.post(
+                "/v1/auth/login",
+                json={"email": "limited@example.com", "password": "wrong"},
+            )
+            for _ in range(6)
+        ]
+
+    assert [response.status_code for response in failures[:5]] == [401] * 5
+    assert failures[5].status_code == 429
+    assert failures[5].headers["retry-after"] == "900"
 
 
 def test_document_content_is_encrypted_in_database_and_file_storage(tmp_path: Path) -> None:
@@ -152,6 +256,10 @@ def test_migration_encrypts_existing_knowledge_rows(tmp_path: Path, monkeypatch)
             (user_id, "legacy:user", "active"),
         )
         connection.exec_driver_sql(
+            "INSERT INTO memberships (tenant_id, user_id, role) VALUES (?, ?, ?)",
+            (tenant_id, user_id, "enterprise_admin"),
+        )
+        connection.exec_driver_sql(
             "INSERT INTO knowledge_answers "
             "(id, tenant_id, created_by, question, answer, status) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -202,12 +310,18 @@ def test_migration_encrypts_existing_knowledge_rows(tmp_path: Path, monkeypatch)
         encrypted_key = connection.exec_driver_sql(
             "SELECT object_key FROM document_versions WHERE id = ?", (version_id,)
         ).scalar_one()
+        space_role = connection.exec_driver_sql(
+            "SELECT role FROM space_memberships WHERE tenant_id = ? AND space_id = ? "
+            "AND user_id = ?",
+            (tenant_id, space_id, user_id),
+        ).scalar_one()
     engine.dispose()
 
     assert question.startswith("enc:v1:")
     assert answer.startswith("enc:v1:")
     assert "Legacy secret" not in question
     assert "Legacy secret" not in answer
+    assert space_role == "manager"
     encrypted_file = (storage_root / encrypted_key).read_bytes()
     context = (
         b"00000000-0000-0000-0000-000000000001:"

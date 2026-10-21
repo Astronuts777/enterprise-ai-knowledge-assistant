@@ -13,7 +13,14 @@ from sqlalchemy.orm import Session
 
 from enterprise_ai_api.crypto import token_hash
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import AuthSession, Membership, Tenant, User
+from enterprise_ai_api.models import (
+    AuthSession,
+    Membership,
+    Space,
+    SpaceMembership,
+    Tenant,
+    User,
+)
 from enterprise_ai_core.security import (
     AccessContext,
     Action,
@@ -147,3 +154,85 @@ def authorize_tenant_action(
             detail="Resource not found or access denied",
         ) from error
     return tenant
+
+
+def tenant_membership(session: Session, tenant_id: UUID, user_id: UUID) -> Membership | None:
+    return session.scalar(
+        select(Membership).where(
+            Membership.tenant_id == tenant_id,
+            Membership.user_id == user_id,
+        )
+    )
+
+
+def accessible_space_ids(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    manage: bool = False,
+) -> list[UUID]:
+    """Return only spaces explicitly granted to the actor; enterprise admins bypass ACLs."""
+
+    membership = tenant_membership(session, tenant_id, user_id)
+    if membership is None:
+        return []
+    if membership.role == Role.ENTERPRISE_ADMIN.value:
+        return list(session.scalars(select(Space.id).where(Space.tenant_id == tenant_id)))
+
+    statement = select(SpaceMembership.space_id).where(
+        SpaceMembership.tenant_id == tenant_id,
+        SpaceMembership.user_id == user_id,
+    )
+    if manage:
+        statement = statement.where(SpaceMembership.role == "manager")
+    return list(session.scalars(statement))
+
+
+def authorize_space_access(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    space_id: UUID,
+    manage: bool = False,
+) -> Space:
+    """Resolve a space only after both tenant membership and its ACL have been checked."""
+
+    space = session.get(Space, space_id)
+    if space is None or space.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    membership = tenant_membership(session, tenant_id, user_id)
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    if membership.role == Role.ENTERPRISE_ADMIN.value:
+        return space
+    grant = session.get(SpaceMembership, (tenant_id, space_id, user_id))
+    if grant is None or (manage and grant.role != "manager"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    return space
+
+
+def can_manage_space(
+    session: Session, *, tenant_id: UUID, user_id: UUID, space_id: UUID
+) -> bool:
+    try:
+        authorize_space_access(
+            session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            space_id=space_id,
+            manage=True,
+        )
+    except HTTPException:
+        return False
+    return True

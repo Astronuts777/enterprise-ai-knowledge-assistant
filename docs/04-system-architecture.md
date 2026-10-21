@@ -75,10 +75,12 @@ flowchart LR
 | 实体 | 关键字段 |
 | --- | --- |
 | `tenants` | `id`, `name`, `status` |
-| `users` | `id`, `external_subject`, `status` |
+| `users` | `id`, `external_subject`, `email_verified_at`, `status` |
 | `memberships` | `tenant_id`, `user_id`, `role` |
 | `spaces` | `id`, `tenant_id`, `name`, `classification` |
-| `space_memberships` | `space_id`, `user_id`, `role` |
+| `space_memberships` | `tenant_id`, `space_id`, `user_id`, `role` (`manager` / `viewer`) |
+| `account_tokens` | `user_id`, `purpose`, `token_digest`, `expires_at`, `consumed_at` |
+| `auth_attempts` | `identity_key`, `network_key`, `succeeded`, `attempted_at` |
 | `documents` | `id`, `tenant_id`, `space_id`, `logical_key`, `title` |
 | `document_versions` | `id`, `document_id`, `version`, `hash`, `valid_from`, `valid_until`, `status`, `object_key` |
 | `chunks` | `id`, `document_version_id`, `locator`, `text`, `search_vector`, `embedding` |

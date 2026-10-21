@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 TenantRole = Literal["enterprise_admin", "knowledge_admin", "member"]
+SpaceRole = Literal["manager", "viewer"]
 Classification = Literal["internal", "confidential", "restricted"]
 DocumentStatus = Literal["ready", "published", "superseded", "failed"]
 
@@ -53,6 +54,24 @@ class AccountResponse(BaseModel):
     user_id: UUID
     email: str
     tenant_id: UUID | None
+    email_verified: bool
+
+
+class EmailAddressRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+
+
+class TokenRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=200)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=200)
+    password: str = Field(min_length=12, max_length=200)
+
+
+class GenericMessage(BaseModel):
+    message: str
 
 
 class InvitationCreate(BaseModel):
@@ -67,6 +86,7 @@ class InvitationResponse(BaseModel):
     role: TenantRole
     expires_at: datetime
     invite_token: str
+    delivery_status: Literal["sent", "manual"]
 
 
 class InvitationAccept(BaseModel):
@@ -85,6 +105,21 @@ class SpaceResponse(BaseModel):
     tenant_id: UUID
     name: str
     classification: Classification
+    created_at: datetime
+
+
+class SpaceMembershipCreate(BaseModel):
+    user_id: UUID
+    role: SpaceRole = "viewer"
+
+
+class SpaceMembershipResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    tenant_id: UUID
+    space_id: UUID
+    user_id: UUID
+    role: SpaceRole
     created_at: datetime
 
 

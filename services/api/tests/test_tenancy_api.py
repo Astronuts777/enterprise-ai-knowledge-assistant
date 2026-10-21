@@ -159,3 +159,61 @@ def test_space_name_is_unique_only_within_each_tenant() -> None:
     assert first.status_code == 201
     assert duplicate.status_code == 409
     assert other_tenant.status_code == 201
+
+
+def test_space_acl_hides_ungranted_spaces_and_distinguishes_viewer_from_manager() -> None:
+    with client() as test_client:
+        tenant = create_tenant(test_client, ADMIN_A, "Acme")
+        created = test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces",
+            json={"name": "Restricted", "classification": "restricted"},
+            headers=headers(ADMIN_A),
+        ).json()
+        test_client.post(
+            f"/v1/tenants/{tenant['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "knowledge_admin"},
+            headers=headers(ADMIN_A),
+        )
+
+        hidden = test_client.get(
+            f"/v1/tenants/{tenant['id']}/spaces", headers=headers(MEMBER_A)
+        )
+        viewer_grant = test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces/{created['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "viewer"},
+            headers=headers(ADMIN_A),
+        )
+        visible = test_client.get(
+            f"/v1/tenants/{tenant['id']}/spaces", headers=headers(MEMBER_A)
+        )
+        viewer_upload = test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces/{created['id']}/documents",
+            files={"file": ("policy.txt", b"restricted policy")},
+            headers=headers(MEMBER_A),
+        )
+        manager_grant = test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces/{created['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "manager"},
+            headers=headers(ADMIN_A),
+        )
+        manager_upload = test_client.post(
+            f"/v1/tenants/{tenant['id']}/spaces/{created['id']}/documents",
+            files={"file": ("policy.txt", b"restricted policy")},
+            headers=headers(MEMBER_A),
+        )
+        revoked = test_client.delete(
+            f"/v1/tenants/{tenant['id']}/spaces/{created['id']}/members/{MEMBER_A}",
+            headers=headers(ADMIN_A),
+        )
+        hidden_again = test_client.get(
+            f"/v1/tenants/{tenant['id']}/spaces", headers=headers(MEMBER_A)
+        )
+
+    assert hidden.json() == []
+    assert viewer_grant.status_code == 200
+    assert [space["id"] for space in visible.json()] == [created["id"]]
+    assert viewer_upload.status_code == 404
+    assert manager_grant.json()["role"] == "manager"
+    assert manager_upload.status_code == 201
+    assert revoked.status_code == 204
+    assert hidden_again.json() == []

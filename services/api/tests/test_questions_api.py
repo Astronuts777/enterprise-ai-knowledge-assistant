@@ -113,6 +113,11 @@ def test_member_can_ask_but_history_is_private_to_each_user(tmp_path: Path) -> N
             json={"user_id": str(MEMBER_A), "role": "member"},
             headers=headers(ADMIN_A),
         )
+        test_client.post(
+            f"/v1/tenants/{tenant_id}/spaces/{space_id}/members",
+            json={"user_id": str(MEMBER_A), "role": "viewer"},
+            headers=headers(ADMIN_A),
+        )
         member_answer = test_client.post(
             f"/v1/tenants/{tenant_id}/questions",
             json={"question": "How many annual leave days are available?"},

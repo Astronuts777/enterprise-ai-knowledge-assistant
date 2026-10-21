@@ -18,6 +18,7 @@ from enterprise_ai_api.database import (
     prepare_database,
 )
 from enterprise_ai_api.document_routes import router as document_router
+from enterprise_ai_api.email_delivery import EmailSender, email_sender_from_environment
 from enterprise_ai_api.object_storage import ObjectStorage, object_storage_from_environment
 from enterprise_ai_api.question_routes import router as question_router
 from enterprise_ai_api.routes import router
@@ -60,6 +61,8 @@ def create_app(
     storage_root: str | None = None,
     *,
     object_storage: ObjectStorage | None = None,
+    email_sender: EmailSender | None = None,
+    require_email_verification: bool | None = None,
     public_demo: bool | None = None,
     account_auth: bool | None = None,
     session_secret: str | None = None,
@@ -86,11 +89,20 @@ def create_app(
         else public_demo
     )
     application.state.session_secret = session_secret or os.getenv("SESSION_SECRET", "")
+    application.state.public_url = os.getenv("APP_PUBLIC_URL", "http://localhost:3000").rstrip("/")
+    application.state.email_sender = email_sender or email_sender_from_environment()
+    application.state.require_email_verification = (
+        os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() in {"1", "true", "yes"}
+        if require_email_verification is None
+        else require_email_verification
+    )
     if application.state.account_auth and application.state.public_demo:
         raise RuntimeError("ACCOUNT_AUTH_MODE and PUBLIC_DEMO_MODE cannot both be enabled")
     require_production_key()
     if application.state.public_demo and not application.state.session_secret:
         raise RuntimeError("SESSION_SECRET is required when PUBLIC_DEMO_MODE is enabled")
+    if application.state.require_email_verification and not application.state.email_sender.enabled:
+        raise RuntimeError("Email delivery must be configured when verification is required")
     local_root = Path(storage_root).resolve() if storage_root is not None else None
     application.state.object_storage = (
         object_storage
@@ -101,7 +113,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=cors_origins_from_environment(),
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type", "X-Dev-User-Id"],
     )
 

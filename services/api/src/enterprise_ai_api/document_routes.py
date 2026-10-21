@@ -20,7 +20,7 @@ from enterprise_ai_api.document_processing import (
     safe_filename,
     validate_extension,
 )
-from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
+from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion
 from enterprise_ai_api.object_storage import ObjectStorage, ObjectStorageError
 from enterprise_ai_api.schemas import (
     DocumentChunkResponse,
@@ -29,7 +29,11 @@ from enterprise_ai_api.schemas import (
     DocumentUploadResponse,
     DocumentVersionResponse,
 )
-from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
+from enterprise_ai_api.tenancy import (
+    CurrentUserId,
+    authorize_space_access,
+    authorize_tenant_action,
+)
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -45,24 +49,52 @@ def get_object_storage(request: Request) -> ObjectStorage:
 Storage = Annotated[ObjectStorage, Depends(get_object_storage)]
 
 
-def _space_or_404(session: Session, tenant_id: UUID, space_id: UUID) -> Space:
-    space = session.get(Space, space_id)
-    if space is None or space.tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found or access denied",
-        )
-    return space
-
-
-def _document_or_404(session: Session, tenant_id: UUID, document_id: UUID) -> Document:
+def _document_or_404(
+    session: Session,
+    tenant_id: UUID,
+    user_id: UUID,
+    document_id: UUID,
+    *,
+    manage: bool,
+) -> Document:
     document = session.get(Document, document_id)
     if document is None or document.tenant_id != tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resource not found or access denied",
         )
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=document.space_id,
+        manage=manage,
+    )
     return document
+
+
+def _version_or_404(
+    session: Session,
+    tenant_id: UUID,
+    user_id: UUID,
+    version_id: UUID,
+    *,
+    manage: bool,
+) -> DocumentVersion:
+    version = session.get(DocumentVersion, version_id)
+    if version is None or version.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found or access denied",
+        )
+    _document_or_404(
+        session,
+        tenant_id,
+        user_id,
+        version.document_id,
+        manage=manage,
+    )
+    return version
 
 
 async def _read_upload(file: UploadFile) -> tuple[str, str, bytes]:
@@ -200,7 +232,13 @@ async def upload_document(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    _space_or_404(session, tenant_id, space_id)
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+        manage=True,
+    )
     filename, extension, content = await _read_upload(file)
     document_title = (title or Path(filename).stem).strip()
     if not document_title:
@@ -250,7 +288,9 @@ async def upload_document_version(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    document = _document_or_404(session, tenant_id, document_id)
+    document = _document_or_404(
+        session, tenant_id, user_id, document_id, manage=True
+    )
     filename, extension, content = await _read_upload(file)
     return _add_version(
         session,
@@ -281,7 +321,13 @@ def list_documents(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    _space_or_404(session, tenant_id, space_id)
+    authorize_space_access(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=space_id,
+        manage=False,
+    )
     documents = session.scalars(
         select(Document)
         .where(Document.tenant_id == tenant_id, Document.space_id == space_id)
@@ -313,7 +359,9 @@ def get_document(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    document = _document_or_404(session, tenant_id, document_id)
+    document = _document_or_404(
+        session, tenant_id, user_id, document_id, manage=False
+    )
     versions = list(
         session.scalars(
             select(DocumentVersion)
@@ -340,12 +388,9 @@ def preview_document_chunks(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    version = session.get(DocumentVersion, version_id)
-    if version is None or version.tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found or access denied",
-        )
+    _version_or_404(
+        session, tenant_id, user_id, version_id, manage=True
+    )
     return list(
         session.scalars(
             select(DocumentChunk)
@@ -371,12 +416,9 @@ def publish_document_version(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    version = session.get(DocumentVersion, version_id)
-    if version is None or version.tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found or access denied",
-        )
+    version = _version_or_404(
+        session, tenant_id, user_id, version_id, manage=True
+    )
     if version.status == "failed":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

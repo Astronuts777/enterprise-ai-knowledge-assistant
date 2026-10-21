@@ -8,14 +8,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import AnswerCitation, KnowledgeAnswer, Space
+from enterprise_ai_api.models import AnswerCitation, Document, KnowledgeAnswer
 from enterprise_ai_api.retrieval import build_grounded_answer, search_published_knowledge
 from enterprise_ai_api.schemas import (
     AnswerCitationResponse,
     KnowledgeAnswerResponse,
     KnowledgeQuestionCreate,
 )
-from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
+from enterprise_ai_api.tenancy import (
+    CurrentUserId,
+    accessible_space_ids,
+    authorize_tenant_action,
+)
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -59,28 +63,24 @@ def ask_knowledge_question(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    scoped_space_ids = list(dict.fromkeys(payload.space_ids or []))
-    if scoped_space_ids:
-        existing_space_ids = set(
-            session.scalars(
-                select(Space.id).where(
-                    Space.tenant_id == tenant_id,
-                    Space.id.in_(scoped_space_ids),
-                )
-            )
-        )
-        scoped_space_ids = [
-            space_id for space_id in scoped_space_ids if space_id in existing_space_ids
-        ]
+    allowed_space_ids = set(
+        accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
+    )
+    requested_space_ids = list(dict.fromkeys(payload.space_ids or []))
+    scoped_space_ids = (
+        [space_id for space_id in requested_space_ids if space_id in allowed_space_ids]
+        if requested_space_ids
+        else list(allowed_space_ids)
+    )
 
     evidence = (
         []
-        if payload.space_ids and not scoped_space_ids
+        if not scoped_space_ids
         else search_published_knowledge(
             session,
             tenant_id=tenant_id,
             question=payload.question,
-            space_ids=scoped_space_ids or None,
+            space_ids=scoped_space_ids,
         )
     )
     answer_text, answer_status = build_grounded_answer(evidence)
@@ -143,4 +143,18 @@ def list_question_history(
             .limit(limit)
         )
     )
-    return [_response(session, answer) for answer in answers]
+    allowed_space_ids = set(
+        accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
+    )
+    visible_answers: list[KnowledgeAnswerResponse] = []
+    for answer in answers:
+        cited_space_ids = set(
+            session.scalars(
+                select(Document.space_id)
+                .join(AnswerCitation, AnswerCitation.document_id == Document.id)
+                .where(AnswerCitation.answer_id == answer.id)
+            )
+        )
+        if cited_space_ids.issubset(allowed_space_ids):
+            visible_answers.append(_response(session, answer))
+    return visible_answers

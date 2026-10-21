@@ -11,6 +11,8 @@ import {
   Membership,
   MembershipRole,
   Space,
+  SpaceMembership,
+  SpaceRole,
   Tenant,
   acceptInvitation,
   askKnowledgeQuestion,
@@ -23,14 +25,21 @@ import {
   listDocuments,
   listMembers,
   listQuestionHistory,
+  listSpaceMembers,
   listSpaces,
   openBrowserSession,
   publishDocumentVersion,
   registerAccount,
+  removeSpaceMember,
+  requestPasswordReset,
+  resendVerification,
+  resetPassword,
   logoutAccount,
   saveMember,
+  saveSpaceMember,
   uploadDocument,
   uploadDocumentVersion,
+  verifyEmail,
 } from "../lib/api";
 
 type View = "overview" | "assistant" | "spaces" | "documents" | "members";
@@ -102,12 +111,15 @@ export default function Dashboard() {
   const [answers, setAnswers] = useState<KnowledgeAnswer[]>([]);
   const [activeSpace, setActiveSpace] = useState<Space | null>(null);
   const [members, setMembers] = useState<Membership[]>([]);
+  const [spaceMembers, setSpaceMembers] = useState<SpaceMembership[]>([]);
+  const [canManageActiveSpace, setCanManageActiveSpace] = useState(false);
   const [canManageMembers, setCanManageMembers] = useState(true);
   const [view, setView] = useState<View>("overview");
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [spaceDialog, setSpaceDialog] = useState(false);
   const [memberDialog, setMemberDialog] = useState(false);
+  const [spaceAccessDialog, setSpaceAccessDialog] = useState(false);
   const [uploadDialog, setUploadDialog] = useState(false);
   const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -305,7 +317,9 @@ export default function Dashboard() {
         } catch {
           copied = false;
         }
-        setNotice(copied ? `邀请链接已复制，有效期至 ${formatDate(invitation.expires_at)}` : `请复制邀请链接：${link}`);
+        setNotice(invitation.delivery_status === "sent"
+          ? `邀请邮件已发送，有效期至 ${formatDate(invitation.expires_at)}`
+          : copied ? `邀请链接已复制，有效期至 ${formatDate(invitation.expires_at)}` : `请复制邀请链接：${link}`);
       } else {
         await saveMember(actorId, tenantId, {
           user_id: String(form.get("user_id") ?? "").trim(),
@@ -317,6 +331,41 @@ export default function Dashboard() {
       setMemberDialog(false);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "保存成员失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveSpaceMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tenantId || !activeSpace) return;
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      await saveSpaceMember(actorId, tenantId, activeSpace.id, {
+        user_id: String(form.get("user_id") ?? "").trim(),
+        role: String(form.get("role")) as SpaceRole,
+      });
+      setSpaceMembers(await listSpaceMembers(actorId, tenantId, activeSpace.id));
+      setNotice("空间访问权限已保存");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "保存空间权限失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemoveSpaceMember(userId: string) {
+    if (!tenantId || !activeSpace) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await removeSpaceMember(actorId, tenantId, activeSpace.id, userId);
+      setSpaceMembers(await listSpaceMembers(actorId, tenantId, activeSpace.id));
+      setNotice("空间访问权限已撤销");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "撤销空间权限失败");
     } finally {
       setBusy(false);
     }
@@ -385,9 +434,21 @@ export default function Dashboard() {
     }
   }
 
-  function openSpace(space: Space) {
+  async function openSpace(space: Space) {
     setActiveSpace(space);
     setView("documents");
+    if (!tenantId) return;
+    try {
+      setSpaceMembers(await listSpaceMembers(actorId, tenantId, space.id));
+      setCanManageActiveSpace(true);
+    } catch (error) {
+      if (error instanceof ApiError && [403, 404].includes(error.status)) {
+        setSpaceMembers([]);
+        setCanManageActiveSpace(false);
+      } else {
+        setNotice(error instanceof Error ? error.message : "无法读取空间权限");
+      }
+    }
   }
 
   function resetDemo() {
@@ -514,6 +575,8 @@ export default function Dashboard() {
               onUpload={() => { setVersionTarget(null); setUploadDialog(true); }}
               onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
               onPublish={handlePublish}
+              canManage={canManageActiveSpace}
+              onManageAccess={() => setSpaceAccessDialog(true)}
             />
           )}
           {view === "members" && (
@@ -541,6 +604,19 @@ export default function Dashboard() {
         </form>
       </Dialog>}
 
+      {spaceAccessDialog && activeSpace && <Dialog title="管理空间访问" description={`只有这里列出的成员能够访问“${activeSpace.name}”；企业管理员始终拥有管理权限。`} onClose={() => setSpaceAccessDialog(false)}>
+        <form className="dialog-form" onSubmit={handleSaveSpaceMember}>
+          <label>企业成员
+            {members.length > 0
+              ? <select name="user_id" required>{members.map((member) => <option key={member.user_id} value={member.user_id}>{member.user_id === actorId ? "当前账号" : shortId(member.user_id)} · {roleLabels[member.role]}</option>)}</select>
+              : <input name="user_id" placeholder="成员 UUID" required />}
+          </label>
+          <label>空间权限<select name="role" defaultValue="viewer"><option value="viewer">查看者：读取与提问</option><option value="manager">管理者：上传、发布与授权</option></select></label>
+          <div className="dialog-actions"><button type="button" onClick={() => setSpaceAccessDialog(false)}>关闭</button><button className="primary-button" disabled={busy} type="submit">保存权限</button></div>
+        </form>
+        {spaceMembers.length > 0 && <div className="space-access-list">{spaceMembers.map((member) => <div key={member.user_id}><span><b>{member.user_id === actorId ? "当前账号" : shortId(member.user_id)}</b><small>{member.role === "manager" ? "空间管理者" : "空间查看者"}</small></span><button disabled={busy} onClick={() => handleRemoveSpaceMember(member.user_id)} type="button">撤销</button></div>)}</div>}
+      </Dialog>}
+
       {uploadDialog && activeSpace && <Dialog
         title={versionTarget ? "上传新版本" : "导入企业资料"}
         description={versionTarget ? `为《${versionTarget.document.title}》添加不可变的新版本。` : `文件将进入“${activeSpace.name}”并自动解析定位。`}
@@ -558,9 +634,18 @@ export default function Dashboard() {
 }
 
 function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: boolean) => void; onReady: (account: Account) => Promise<void> }) {
-  const [invitation] = useState(() => new URLSearchParams(window.location.search).get("invite") ?? "");
-  const [invitationTenant] = useState(() => new URLSearchParams(window.location.search).get("tenant") ?? "");
-  const [mode, setMode] = useState<"login" | "create" | "join">(invitation ? "join" : "login");
+  type AuthMode = "login" | "create" | "join" | "forgot" | "verify" | "reset";
+  const [parameters] = useState(() => new URLSearchParams(window.location.search));
+  const [invitation] = useState(() => parameters.get("invite") ?? "");
+  const [invitationTenant] = useState(() => parameters.get("tenant") ?? "");
+  const [linkToken] = useState(() => parameters.get("token") ?? "");
+  const [mode, setMode] = useState<AuthMode>(() => {
+    if (parameters.get("mode") === "verify") return "verify";
+    if (parameters.get("mode") === "reset") return "reset";
+    return invitation ? "join" : "login";
+  });
+  const [pendingEmail, setPendingEmail] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -570,16 +655,23 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
     const password = String(form.get("password") ?? "");
     onBusy(true);
     setError(null);
+    setMessage(null);
     try {
       if (mode === "login") {
         await onReady(await loginAccount(email, password));
       } else if (mode === "create") {
-        await onReady(await registerAccount({
+        const account = await registerAccount({
           email,
           password,
           organization_name: String(form.get("organization_name") ?? "").trim(),
-        }));
-      } else {
+        });
+        if (account.email_verified) await onReady(account);
+        else {
+          setPendingEmail(email);
+          setMode("verify");
+          setMessage("验证邮件已发送，请在 24 小时内完成验证。");
+        }
+      } else if (mode === "join") {
         let account: Account;
         try {
           account = await registerAccount({ email, password });
@@ -587,18 +679,64 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
           if (!(registrationError instanceof ApiError) || registrationError.status !== 409) throw registrationError;
           account = await loginAccount(email, password);
         }
+        if (!account.email_verified) {
+          setPendingEmail(email);
+          setMode("verify");
+          setMessage("请先验证受邀邮箱，再接受企业邀请。");
+          return;
+        }
         const accepted = await acceptInvitation(
           String(form.get("tenant_id") ?? "").trim(),
           String(form.get("invite_token") ?? "").trim(),
         );
         await onReady({ ...accepted, email: account.email });
+      } else if (mode === "forgot") {
+        await requestPasswordReset(email);
+        setPendingEmail(email);
+        setMessage("如果账号存在，密码重置邮件已经发送。");
+      } else if (mode === "verify") {
+        const account = await verifyEmail(String(form.get("token") ?? linkToken).trim());
+        if (invitation && invitationTenant) {
+          const accepted = await acceptInvitation(invitationTenant, invitation);
+          await onReady({ ...accepted, email: account.email });
+        } else {
+          await onReady(account);
+        }
+      } else if (mode === "reset") {
+        await onReady(await resetPassword(
+          String(form.get("token") ?? linkToken).trim(),
+          password,
+        ));
       }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "认证失败");
+      if (mode === "login" && submitError instanceof ApiError && submitError.status === 403) {
+        setPendingEmail(email);
+        setMode("verify");
+        setMessage("该账号需要先完成邮箱验证。");
+      } else {
+        setError(submitError instanceof Error ? submitError.message : "认证失败");
+      }
     } finally {
       onBusy(false);
     }
   }
+
+  async function resend() {
+    if (!pendingEmail) return;
+    onBusy(true);
+    setError(null);
+    try {
+      await resendVerification(pendingEmail);
+      setMessage("如果账号仍待验证，新的验证邮件已经发送。");
+    } catch (resendError) {
+      setError(resendError instanceof Error ? resendError.message : "重新发送失败");
+    } finally {
+      onBusy(false);
+    }
+  }
+
+  const title = mode === "login" ? "欢迎回来" : mode === "create" ? "创建企业账号" : mode === "join" ? "加入企业" : mode === "forgot" ? "找回密码" : mode === "verify" ? "验证邮箱" : "设置新密码";
+  const description = mode === "login" ? "使用已授权的企业账号进入。" : mode === "create" ? "创建者将成为首位企业管理员。" : mode === "join" ? "邀请邮箱必须与注册邮箱一致。" : mode === "forgot" ? "我们会向账号邮箱发送一个 30 分钟有效的链接。" : mode === "verify" ? "验证完成前不会建立企业访问会话。" : "重置成功后，所有旧会话都会失效。";
 
   return <main className="onboarding auth-page">
     <section className="onboarding-story">
@@ -608,19 +746,25 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
     </section>
     <section className="onboarding-form-wrap">
       <form className="onboarding-form" onSubmit={submit}>
-        <div className="auth-tabs">
+        {(["login", "create", "join"] as AuthMode[]).includes(mode) && <div className="auth-tabs">
           <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>登录</button>
           <button className={mode === "create" ? "active" : ""} type="button" onClick={() => setMode("create")}>创建企业</button>
           <button className={mode === "join" ? "active" : ""} type="button" onClick={() => setMode("join")}>接受邀请</button>
-        </div>
-        <h2>{mode === "login" ? "欢迎回来" : mode === "create" ? "创建企业账号" : "加入企业"}</h2>
-        <p>{mode === "login" ? "使用已授权的企业账号进入。" : mode === "create" ? "创建者将成为首位企业管理员。" : "邀请邮箱必须与注册邮箱一致。"}</p>
-        <label>邮箱<input name="email" type="email" autoComplete="email" placeholder="name@company.com" required /></label>
-        <label>密码<input name="password" type="password" minLength={12} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="至少 12 个字符" required /></label>
+        </div>}
+        <h2>{title}</h2>
+        <p>{description}</p>
+        {["login", "create", "join", "forgot"].includes(mode) && <label>邮箱<input name="email" type="email" autoComplete="email" defaultValue={pendingEmail} placeholder="name@company.com" required /></label>}
+        {["login", "create", "join", "reset"].includes(mode) && <label>{mode === "reset" ? "新密码" : "密码"}<input name="password" type="password" minLength={12} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="至少 12 个字符" required /></label>}
         {mode === "create" && <label>企业名称<input name="organization_name" minLength={2} maxLength={160} placeholder="例如：远景科技" required /></label>}
         {mode === "join" && <><label>企业 ID<input name="tenant_id" defaultValue={invitationTenant} required /></label><label>邀请令牌<input name="invite_token" defaultValue={invitation} required /></label></>}
-        <button className="primary-button wide" disabled={busy} type="submit">{busy ? "正在验证…" : mode === "login" ? "安全登录" : mode === "create" ? "创建并进入" : "验证邀请并加入"}<Icon name="arrow" /></button>
+        {mode === "verify" && <label>验证令牌<input name="token" defaultValue={linkToken} required /></label>}
+        {mode === "reset" && <label>重置令牌<input name="token" defaultValue={linkToken} required /></label>}
+        <button className="primary-button wide" disabled={busy} type="submit">{busy ? "正在处理…" : mode === "login" ? "安全登录" : mode === "create" ? "创建账号" : mode === "join" ? "验证邀请并加入" : mode === "forgot" ? "发送重置邮件" : mode === "verify" ? "完成邮箱验证" : "保存新密码"}<Icon name="arrow" /></button>
+        {mode === "login" && <button className="text-button" type="button" onClick={() => setMode("forgot")}>忘记密码？</button>}
+        {mode === "verify" && pendingEmail && <button className="text-button" disabled={busy} type="button" onClick={resend}>重新发送验证邮件</button>}
+        {!["login", "create", "join"].includes(mode) && <button className="text-button" type="button" onClick={() => { setMode("login"); setError(null); setMessage(null); }}>返回登录</button>}
         <p className="security-note"><Icon name="shield" />密码使用 scrypt 加盐哈希，系统不会保存明文密码。</p>
+        {message && <p className="form-success">{message}</p>}
         {error && <p className="form-error">{error}</p>}
       </form>
     </section>
@@ -705,12 +849,12 @@ function SpacesView({ spaces, documentsBySpace, onCreate, onOpen }: { spaces: Sp
   </>;
 }
 
-function DocumentsView({ space, documents, busy, onBack, onUpload, onNewVersion, onPublish }: { space: Space; documents: DocumentSummary[]; busy: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void }) {
+function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onManageAccess }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onManageAccess: () => void }) {
   const statusLabels = { ready: "待发布", published: "已发布", superseded: "已替代", failed: "解析失败" };
   return <>
     <button className="back-button" onClick={onBack}><Icon name="back" />返回知识空间</button>
-    <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>上传、检查并发布企业资料；只有已发布版本会进入后续检索。</p></div><button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button></div>
-    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>导入第一份企业资料</h2><p>支持 PDF、DOCX、TXT 和 Markdown。系统会保存原件、计算哈希并生成带定位的文本块。</p><button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button></section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><div><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></div><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions">{item.latest_version.status === "ready" && <button disabled={busy} onClick={() => onPublish(item)}>发布</button>}<button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button></div></article>)}</section>}
+    <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>只有获得该空间授权的成员可以读取资料和参与检索。</p></div><div className="heading-actions">{canManage && <button className="secondary-button" onClick={onManageAccess}><Icon name="shield" />管理访问</button>}{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button>}</div></div>
+    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><div><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></div><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions">{canManage && item.latest_version.status === "ready" && <button disabled={busy} onClick={() => onPublish(item)}>发布</button>}{canManage && <button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button>}{!canManage && <span>只读</span>}</div></article>)}</section>}
   </>;
 }
 
