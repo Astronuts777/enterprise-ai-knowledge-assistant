@@ -1,64 +1,279 @@
 # Enterprise AI Knowledge Assistant
 
-一个面向不同企业的可信知识库与 AI 决策证据平台。
+面向不同企业的可信知识库与 AI 决策证据平台。它不绑定某个确定行业，而是用统一的企业、成员、
+知识空间、文档版本、权限和引用模型，为不同组织建立自己的知识工作台。
 
-系统将帮助企业导入和管理 PDF、网页、会议记录及内部文档，在权限边界内提供带精确引用的回答，并处理版本冲突、信息过期、敏感信息、质量评测与人工审批。
+- **公开演示**：[enterprise-ai-knowledge-assistant-y39d.onrender.com](https://enterprise-ai-knowledge-assistant-y39d.onrender.com)
+- **API 文档（本地）**：[http://localhost:8000/docs](http://localhost:8000/docs)
+- **Web（本地）**：[http://localhost:3000](http://localhost:3000)
+
+> 公开地址是免费演示环境，不是正式生产系统。请勿上传真实机密资料。
+
+## 这个 Web 可以做什么
+
+当前版本已经打通一条可操作的企业知识闭环：
+
+1. 创建独立的企业工作区，创建者自动成为企业管理员。
+2. 按部门、项目或业务主题创建知识空间，并设置内部、机密或严格受限等级。
+3. 添加企业成员，分配企业管理员、知识管理员或普通成员角色。
+4. 上传并解析不超过 10 MB 的 PDF、DOCX、TXT 和 Markdown 文件。
+5. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
+6. 只针对已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
+7. 在资料不足时明确拒答，不用没有来源的内容补全答案。
+8. 保存当前用户自己的问答历史，并阻止跨企业读取数据。
+
+适合用来验证以下场景：
+
+- 公司制度、员工手册和标准流程查询；
+- 项目文档、交付材料和会议纪要整理；
+- 产品、运营、客服或销售知识库；
+- 对结论来源、版本和证据链有要求的内部问答；
+- 跨行业企业知识助手的产品原型和用户测试。
+
+### 当前能力边界
+
+- 问答使用透明、可重复的本地关键词检索和原文摘录，尚未调用外部大模型。
+- 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
+- 本地开发身份通过 `X-Dev-User-Id` 模拟；公开演示使用服务端签名的 HttpOnly 会话。
+- 企业 SSO、SCIM、OCR、云盘连接器、向量检索、决策证据包、审批和完整审计仍在路线图中。
+- Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
 
-- **有证据**：回答必须关联原始文档、版本和位置。
-- **有权限**：检索和生成均遵循企业、空间、文档和用户权限。
-- **可追溯**：记录数据来源、检索过程、AI 输出、人工修改与批准结果。
-- **诚实拒答**：证据不足、权限不足或来源冲突时，不生成确定性结论。
-- **人工负责**：高风险或重要决策必须由获得授权的人确认。
-- **行业无关**：核心平台不绑定单一行业，行业差异通过配置和知识包扩展。
+- **有证据**：回答必须关联原始文档、不可变版本和稳定位置。
+- **有权限**：检索和回答必须在企业与角色边界内完成。
+- **可追溯**：保存数据来源、文档版本、问题、答案和引用快照。
+- **诚实拒答**：证据不足时返回资料不足，不生成伪确定结论。
+- **人工负责**：AI 提供证据，不替代高风险业务决定的负责人。
+- **行业无关**：核心数据结构不绑定行业，差异通过配置和知识内容扩展。
 
-## 当前阶段
+## 系统结构
 
-项目已进入 MVP 基础开发阶段。首个跨行业工作流、P0 范围、用户故事、系统架构和初始技术栈已经确认，当前正在建立权限优先的纵向功能切片。
-
-## 本地开发
-
-### Web
-
-```bash
-pnpm install
-pnpm dev:web
+```mermaid
+flowchart LR
+    U[企业用户] --> W[Next.js Web]
+    W --> A[FastAPI]
+    A --> P[身份与权限检查]
+    P --> D[(SQLite 或 PostgreSQL)]
+    A --> F[文件存储]
+    A --> R[权限感知检索]
+    R --> D
+    R --> C[回答与不可变引用]
+    K[Worker 边界] -. 后续异步解析 .-> A
 ```
 
-访问 `http://localhost:3000`。当前 Web 控制台已支持：
+当前部署把静态导出的 Next.js Web 和 FastAPI 放在同一个 Docker 服务中，对外只暴露一个
+HTTPS 地址。生产目标架构会将 Web、API、Worker、PostgreSQL、对象存储和模型适配器拆分。
 
-- 首次创建企业工作区，并将本地演示用户设为企业管理员。
-- 查看工作区总览和权限基础状态。
-- 创建不同保密等级的知识空间。
-- 添加企业成员并分配企业管理员、知识管理员或普通成员角色。
-- 在知识空间中上传、解析和发布 PDF、DOCX、TXT 与 Markdown。
-- 为同一逻辑文档上传新版本，旧发布版本会保留并标记为已替代。
-- 对已发布资料提问，获得带文件、版本和页码/段落定位的证据式回答。
-- 在证据不足时明确拒答，并保存每个用户自己的问答历史。
-- 在前端直接显示 API 权限错误和跨租户拒绝结果。
+### 技术栈
 
-Web 默认连接 `http://localhost:8000`。需要修改 API 地址时，复制
-`apps/web/.env.example` 为 `apps/web/.env.local` 并修改 `NEXT_PUBLIC_API_URL`。
-本地运行可在 PyCharm 中选择 `Local: Web + API`，或分别启动 `Web: Dev` 和
-`API: FastAPI`。
+| 层级 | 当前实现 |
+| --- | --- |
+| Web | Next.js 16、React 19、TypeScript |
+| API | FastAPI、Pydantic、Uvicorn |
+| 数据访问 | SQLAlchemy 2、Alembic |
+| 本地数据库 | 持久化 SQLite |
+| 部署数据库 | PostgreSQL，包含行级安全策略 |
+| 文档解析 | pypdf、python-docx、纯文本解析 |
+| 包管理 | pnpm 11、Python 锁定依赖 |
+| 部署 | Docker、Render Blueprint |
 
-### API 与测试
+## 仓库结构
+
+```text
+apps/web/                         Next.js 企业知识工作台
+services/api/                     FastAPI、权限、文档和问答接口
+services/worker/                  后续异步解析与索引 Worker 边界
+packages/core/                    共享权限与领域逻辑
+migrations/                       Alembic 数据库迁移
+infra/                            本地 PostgreSQL 与 MinIO
+docs/                             产品、架构、用户故事和 ADR
+.run/                             PyCharm 运行配置
+Dockerfile                        公网部署镜像
+render.yaml                       Render Web 与 PostgreSQL Blueprint
+requirements.lock                锁定的 Python 依赖
+pnpm-lock.yaml                    锁定的前端依赖
+```
+
+## 完整开发流程
+
+### 1. 准备环境
+
+建议使用：
+
+- Python 3.12–3.14；
+- Node.js 22；
+- pnpm 11.25.0；
+- Git；
+- Docker Desktop（仅在使用 PostgreSQL 和 MinIO 时需要）。
+
+如果终端提示 `pnpm: command not found`：
+
+```bash
+corepack enable
+corepack prepare pnpm@11.25.0 --activate
+pnpm --version
+```
+
+如果安装的 Node.js 没有 Corepack，可以改用：
+
+```bash
+npm install --global pnpm@11.25.0
+```
+
+### 2. 获取代码
+
+```bash
+git clone https://github.com/Astronuts777/enterprise-ai-knowledge-assistant.git
+cd enterprise-ai-knowledge-assistant
+```
+
+### 3. 安装依赖
 
 ```bash
 python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.lock
-.venv/bin/python -m pytest
-.venv/bin/ruff check .
+pnpm install --frozen-lockfile
+```
+
+Windows PowerShell 中，Python 路径通常是 `.venv\Scripts\python.exe`。
+
+### 4. 启动本地开发环境
+
+终端一启动 API：
+
+```bash
 PYTHONPATH=services/api/src:packages/core/src \
+  .venv/bin/uvicorn enterprise_ai_api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+终端二启动 Web：
+
+```bash
+pnpm dev:web
+```
+
+然后打开：
+
+- Web：`http://localhost:3000`
+- Swagger API：`http://localhost:8000/docs`
+- 健康检查：`http://localhost:8000/healthz`
+
+Web 默认连接 `http://localhost:8000`。如需修改地址：
+
+```bash
+cp apps/web/.env.example apps/web/.env.local
+```
+
+再修改 `apps/web/.env.local` 中的 `NEXT_PUBLIC_API_URL`。
+
+### 5. 使用 PyCharm 启动
+
+1. 用 PyCharm 打开仓库根目录。
+2. 将 Python Interpreter 设为仓库中的 `.venv/bin/python`。
+3. 在运行配置中选择 **Local: Web + API**。
+4. 点击运行后访问 `http://localhost:3000`。
+
+也可以分别运行 **API: FastAPI** 和 **Web: Dev**。`Worker` 输出 `No jobs available` 后正常退出，
+代表当前没有异步任务，不是网站启动失败。
+
+### 6. 完成一次本地业务验证
+
+建议每次功能开发后走一遍最短主链路：
+
+1. 创建一个企业。
+2. 创建知识空间。
+3. 上传一份 TXT 或 Markdown 文档。
+4. 查看解析结果并发布版本。
+5. 在 AI 决策助手中提出文档能够回答的问题。
+6. 检查回答是否包含文件、版本、位置和原文片段。
+7. 再询问一个资料中不存在的问题，确认系统明确拒答。
+
+### 7. 运行质量检查
+
+提交代码前执行：
+
+```bash
+.venv/bin/ruff check .
+.venv/bin/python -m pytest
+pnpm lint:web
+pnpm test:web
+pnpm build:web
+```
+
+当前测试会启用 SQLite 外键约束，覆盖企业、成员、空间、文档版本、文本块、问答、引用和跨租户边界。
+
+### 8. 建议的代码提交过程
+
+```bash
+git switch -c codex/feature-name
+# 修改代码并运行全部质量检查
+git status
+git diff --check
+git add <相关文件>
+git commit -m "feat: describe the change"
+git push -u origin codex/feature-name
+```
+
+创建 Pull Request 后先检查测试结果和部署预览，再合并到 `main`。紧急演示修复也应补回归测试，
+避免只修复线上现象而没有覆盖数据库约束。
+
+## 数据库与文件存储
+
+### 默认 SQLite 模式
+
+不设置 `DATABASE_URL` 时：
+
+- 数据库：`data/local/enterprise_ai.db`
+- 上传文件：`data/local/uploads/`
+- API 启动时自动执行 Alembic 迁移；
+- 两个位置都被 Git 忽略。
+
+备份时先停止 API，再复制整个 `data/local/`。需要全新环境时，将该目录移动到备份位置后重启 API。
+
+### PostgreSQL 与 MinIO 模式
+
+安装 Docker 后启动依赖：
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+执行迁移并启动 API：
+
+```bash
+MIGRATION_DATABASE_URL='postgresql+psycopg://app_owner:local-development-only@localhost:5432/enterprise_ai' \
+  .venv/bin/alembic upgrade head
+
+DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:5432/enterprise_ai' \
+  PYTHONPATH=services/api/src:packages/core/src \
   .venv/bin/uvicorn enterprise_ai_api.main:app --reload
 ```
 
-API 健康检查位于 `http://localhost:8000/healthz`。
+PostgreSQL 迁移会启用并强制执行租户行级安全。应用层仍执行显式授权，形成应用和数据库两层隔离。
+当前业务上传仍使用 `LOCAL_STORAGE_PATH`；MinIO 是后续对象存储接入的本地依赖边界。
 
-首次纵向功能切片已经提供以下接口：
+## 环境变量
+
+| 变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| `APP_ENV` | 环境标识 | `development` |
+| `DATABASE_URL` | API 运行数据库 | 本地 SQLite |
+| `MIGRATION_DATABASE_URL` | Alembic 迁移数据库 | `alembic.ini` 中的本地 PostgreSQL |
+| `LOCAL_STORAGE_PATH` | 上传文件目录 | `data/local/uploads` |
+| `CORS_ORIGINS` | 允许访问 API 的 Web 来源，逗号分隔 | 本地 3000–3002 端口 |
+| `PUBLIC_DEMO_MODE` | 启用签名浏览器演示会话 | `false` |
+| `SESSION_SECRET` | 公开演示会话签名密钥 | 无；演示模式必须设置 |
+| `WEB_STATIC_DIR` | 由 FastAPI 托管的 Web 静态导出目录 | 无 |
+| `NEXT_PUBLIC_API_URL` | 浏览器请求的 API 地址 | `http://localhost:8000` |
+
+不要提交 `.env`、访问密钥、数据库密码或真实企业资料。
+
+## API 概览
 
 ```text
+POST /v1/session
 POST /v1/tenants
 GET  /v1/tenants/{tenant_id}
 POST /v1/tenants/{tenant_id}/members
@@ -73,13 +288,10 @@ GET  /v1/tenants/{tenant_id}/document-versions/{version_id}/chunks
 POST /v1/tenants/{tenant_id}/document-versions/{version_id}/publish
 POST /v1/tenants/{tenant_id}/questions
 GET  /v1/tenants/{tenant_id}/questions
+GET  /healthz
 ```
 
-未设置 `DATABASE_URL` 时，API 使用持久化 SQLite：业务记录保存在
-`data/local/enterprise_ai.db`，上传原件保存在 `data/local/uploads/`。两个位置都被 Git 忽略，
-重启 API 后数据不会丢失。API 启动时会自动执行本地 Alembic 迁移。打开
-`http://localhost:8000/docs` 可在 Swagger UI 中调用接口。当前身份适配器使用
-`X-Dev-User-Id` 请求头模拟已验证用户，例如：
+本地模式可使用 `X-Dev-User-Id` 模拟身份：
 
 ```bash
 curl -X POST http://localhost:8000/v1/tenants \
@@ -88,66 +300,79 @@ curl -X POST http://localhost:8000/v1/tenants \
   -d '{"name":"示例企业"}'
 ```
 
-`X-Dev-User-Id` 仅用于本地纵向切片；接入企业 SSO 后必须由服务端验证的身份声明替代，
-不能在生产环境信任客户端自报的用户 ID。
+这个请求头只能用于本地开发，不能作为生产身份验证。
 
-本地备份前先停止 API，然后复制整个 `data/local/` 目录。需要全新演示环境时，停止 API，
-将该目录移到其他位置保存，再重新启动；系统会创建新的数据库和上传目录。
+## 部署流程
 
-当前 10 MB 以内的文档在请求内完成首轮解析，以便验证完整链路。进入大文件、OCR 和批量导入
-阶段后，解析将迁移到已有 Worker 边界，避免阻塞 API。
+### Render 公开演示环境
 
-当前问答采用透明、可重复的本地关键词检索，只读取状态为“已发布”的版本。命中时由原文摘录
-组成答案并附带不可变引用快照；没有充分命中时返回“资料不足”，不会调用外部模型或虚构答案。
-下一阶段可在保持相同权限、拒答和引用契约的前提下，将检索升级为 pgvector 混合检索，并接入
-可配置的大模型生成层。
+`Dockerfile` 会构建 Next.js 静态页面，并把它与 FastAPI 放入同一镜像。`render.yaml` 会创建：
 
-### 本地依赖服务
+- 一个 Docker Web Service；
+- 一个 PostgreSQL 数据库；
+- `SESSION_SECRET` 等演示环境变量；
+- `/healthz` 健康检查。
 
-安装 Docker 后运行：
+一键创建：
 
-```bash
-docker compose -f infra/docker-compose.yml up -d
-```
+[在 Render 创建 Blueprint](https://dashboard.render.com/blueprint/new?repo=https%3A%2F%2Fgithub.com%2FAstronuts777%2Fenterprise-ai-knowledge-assistant)
 
-这将启动带 pgvector 的 PostgreSQL 和 S3 兼容对象存储。`.env.example` 中仅包含本地开发占位凭据，不得用于共享或生产环境。
+发布步骤：
 
-PostgreSQL 启动后，先以表所有者执行迁移，再以不具备 `BYPASSRLS` 权限的运行账户启动 API：
+1. 将通过检查的提交推送到 GitHub `main`。
+2. 等待 Render 自动构建该提交。
+3. 如果未自动触发，在 Render 选择 **Manual Deploy → Deploy latest commit**。
+4. 确认状态为 **Deploy succeeded | Live**。
+5. 打开公开地址，实际完成一次企业创建和知识空间操作。
+6. 检查 Render 日志中没有新的 500、数据库约束或迁移错误。
 
-```bash
-MIGRATION_DATABASE_URL='postgresql+psycopg://app_owner:local-development-only@localhost:5432/enterprise_ai' \
-  .venv/bin/alembic upgrade head
-DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:5432/enterprise_ai' \
-  PYTHONPATH=services/api/src:packages/core/src \
-  .venv/bin/uvicorn enterprise_ai_api.main:app --reload
-```
+免费演示环境的限制：
 
-迁移会为企业、成员、空间、文档、版本和文本块表启用并强制执行 PostgreSQL 行级安全。
-应用层仍会在每个用例执行显式授权，构成两层隔离。
-
-`requirements-dev.txt` 记录直接 Python 依赖，`requirements.lock` 和 `pnpm-lock.yaml` 固定完整依赖解析结果。
-
-## 部署公开演示环境
-
-仓库根目录的 `Dockerfile` 会把 Next.js 静态页面与 FastAPI 打包成同一个服务，
-`render.yaml` 会同时创建 Web 服务和 PostgreSQL。点击下面的入口，用 Render 登录并连接
-GitHub 仓库，然后确认 **Apply** 即可开始首次部署：
-
-[在 Render 创建公开演示环境](https://dashboard.render.com/blueprint/new?repo=https%3A%2F%2Fgithub.com%2FAstronuts777%2Fenterprise-ai-knowledge-assistant)
-
-部署成功后，Render 会显示一个 `https://…onrender.com` 地址，这就是可以分享给其他人的访问链接。
-GitHub `main` 分支后续有新提交时，服务会自动重新部署。
-
-公开演示模式不再信任浏览器提交的用户 UUID，而是给每个浏览器签发服务端签名的 HttpOnly
-会话 Cookie。它仍是产品演示环境，不是正式生产环境；请勿上传真实机密资料。当前免费方案还存在：
-
-- 15 分钟无访问后休眠，首次唤醒可能需要约一分钟；
+- 闲置 15 分钟后休眠，首次唤醒可能需要约一分钟；
 - 免费 PostgreSQL 创建 30 天后到期；
-- 上传文件所在的本地磁盘会随休眠、重启或重新部署而清空，但已解析的文本块仍保存在数据库中。
+- Web 服务文件系统是临时的，上传原件可能在休眠、重启或重新部署后消失；
+- 已解析的文本块保存在 PostgreSQL，但缺少原件时不能视为完整的生产证据链。
 
-正式给企业用户使用前，应升级持久数据库与对象存储，并接入企业 SSO、域名和备份策略。
+正式生产部署必须使用持久对象存储和长期数据库，并接入企业 SSO、备份恢复、密钥管理、审计、
+监控告警和数据保留策略。
 
-## 文档
+## 常见问题
+
+### `zsh: command not found: pnpm`
+
+先执行 `corepack enable` 和 `corepack prepare pnpm@11.25.0 --activate`，再重新打开终端。
+
+### `http://localhost:8000/docs` 能打开，但完整网页打不开
+
+`8000/docs` 只是 API 文档。还需要运行 `pnpm dev:web`，然后访问 `http://localhost:3000`。
+
+### PyCharm 显示 `No jobs available` 并正常退出
+
+运行的是 Worker 占位入口，不是 Web 或 API。请选择 **Local: Web + API**。
+
+### Render 页面显示 `API 请求失败`
+
+先查看 Web Service 的 **Logs**，找到同一时间的 Python 或 PostgreSQL 异常。不要只看前端提示；
+修复后应增加回归测试、推送新提交并验证线上业务操作。
+
+### 文档上传后为什么只有已发布版本能被问答使用
+
+这是证据完整性设计。`ready` 只表示解析完成，只有知识管理员明确发布的版本才能进入默认检索。
+
+## 路线图
+
+- [x] 企业、成员、角色和知识空间
+- [x] 文档上传、解析、版本和发布
+- [x] 权限感知的证据问答、引用与拒答
+- [x] SQLite 本地开发与 PostgreSQL 演示部署
+- [ ] pgvector 关键词与语义混合检索
+- [ ] 可配置的大模型生成与引用校验
+- [ ] 决策证据包、人工审批和审计事件
+- [ ] 异步 Worker、OCR 和批量导入
+- [ ] 企业 SSO、SCIM 与外部知识连接器
+- [ ] 评测集、安全门禁、备份和生产运维
+
+## 项目文档
 
 - [项目章程](docs/00-project-charter.md)
 - [产品定位](docs/01-product-positioning.md)
@@ -157,13 +382,3 @@ GitHub `main` 分支后续有新提交时，服务会自动重新部署。
 - [AI 协作记录](docs/ai-development-log.md)
 - [横向产品策略决策](docs/decisions/ADR-0001-horizontal-product-strategy.md)
 - [初始技术栈提案](docs/decisions/ADR-0002-initial-technology-stack.md)
-
-## 计划阶段
-
-1. 实现企业、成员、知识空间和数据库行级安全
-2. 完成文档上传、解析、版本和发布流程
-3. 完成权限感知检索、引用问答和拒答
-4. 完成决策证据包、审批和审计
-5. 建立评测集、安全门禁和持续集成
-6. 部署测试环境并开展用户验证
-
