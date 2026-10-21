@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "services/api/src"), str(ROOT / "packages/core/src")]
 
 from enterprise_ai_api import models  # noqa: E402, F401
-from enterprise_ai_api.database import Base  # noqa: E402
+from enterprise_ai_api.database import Base, normalize_database_url  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
@@ -20,7 +20,8 @@ if config.config_file_name is not None:
 
 migration_url = os.getenv("MIGRATION_DATABASE_URL")
 if migration_url:
-    config.set_main_option("sqlalchemy.url", migration_url)
+    normalized_url = normalize_database_url(migration_url).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", normalized_url)
 
 target_metadata = Base.metadata
 

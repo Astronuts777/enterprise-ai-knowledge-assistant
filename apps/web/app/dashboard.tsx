@@ -19,6 +19,7 @@ import {
   listMembers,
   listQuestionHistory,
   listSpaces,
+  openBrowserSession,
   publishDocumentVersion,
   saveMember,
   uploadDocument,
@@ -29,6 +30,7 @@ type View = "overview" | "assistant" | "spaces" | "documents" | "members";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
+const PUBLIC_DEMO = process.env.NEXT_PUBLIC_APP_MODE === "public-demo";
 
 const roleLabels: Record<MembershipRole, string> = {
   enterprise_admin: "企业管理员",
@@ -132,21 +134,20 @@ export default function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    queueMicrotask(() => {
+    queueMicrotask(async () => {
       if (cancelled) return;
       const storedActor = window.localStorage.getItem(ACTOR_KEY) ?? crypto.randomUUID();
       const storedTenant = window.localStorage.getItem(TENANT_KEY);
-      window.localStorage.setItem(ACTOR_KEY, storedActor);
-      setActorId(storedActor);
-      setTenantId(storedTenant);
+      try {
+        const session = await openBrowserSession(storedActor);
+        if (cancelled) return;
+        window.localStorage.setItem(ACTOR_KEY, session.user_id);
+        setActorId(session.user_id);
+        setTenantId(storedTenant);
 
-      if (!storedTenant) {
-        setReady(true);
-        return;
-      }
-
-      loadWorkspace(storedActor, storedTenant)
-        .catch((error: unknown) => {
+        if (!storedTenant) return;
+        await loadWorkspace(session.user_id, storedTenant);
+      } catch (error: unknown) {
           if (error instanceof ApiError && error.status === 404) {
             window.localStorage.removeItem(TENANT_KEY);
             setTenantId(null);
@@ -154,10 +155,9 @@ export default function Dashboard() {
             return;
           }
           setNotice(error instanceof Error ? error.message : "无法载入工作区");
-        })
-        .finally(() => {
-          if (!cancelled) setReady(true);
-        });
+      } finally {
+        if (!cancelled) setReady(true);
+      }
     });
 
     return () => {
@@ -347,7 +347,7 @@ export default function Dashboard() {
             <button className="primary-button wide" disabled={busy} type="submit">
               {busy ? "正在创建…" : "进入工作区"}<Icon name="arrow" />
             </button>
-            <div className="dev-identity"><span />本地演示身份：{shortId(actorId)}</div>
+            <div className="dev-identity"><span />{PUBLIC_DEMO ? "安全演示会话" : "本地演示身份"}：{shortId(actorId)}</div>
             {notice && <p className="form-error">{notice}</p>}
           </form>
         </section>
@@ -386,7 +386,7 @@ export default function Dashboard() {
       <section className="workspace">
         <header className="topbar">
           <button className="tenant-switcher"><span>{tenant.name.slice(0, 1)}</span><div><small>当前企业</small><b>{tenant.name}</b></div></button>
-          <div className="topbar-user"><div><b>本地演示管理员</b><span>{actorMembership ? roleLabels[actorMembership.role] : "已授权成员"}</span></div><i>{actorId.slice(0, 2).toUpperCase()}</i></div>
+          <div className="topbar-user"><div><b>{PUBLIC_DEMO ? "演示管理员" : "本地演示管理员"}</b><span>{actorMembership ? roleLabels[actorMembership.role] : "已授权成员"}</span></div><i>{actorId.slice(0, 2).toUpperCase()}</i></div>
         </header>
 
         <div className="content">
@@ -533,7 +533,7 @@ function DocumentsView({ space, documents, busy, onBack, onUpload, onNewVersion,
 
 function MembersView({ members, actorId, canManage, onAdd }: { members: Membership[]; actorId: string; canManage: boolean; onAdd: () => void }) {
   return <><div className="page-heading"><div><p className="kicker">访问控制</p><h1>成员与权限</h1><p>企业角色决定成员能够管理和访问哪些内容。</p></div>{canManage && <button className="primary-button" onClick={onAdd}><Icon name="plus" />添加成员</button>}</div>
-    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? "本地演示管理员" : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
+    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span></div>)}</section>}
   </>;
 }
 

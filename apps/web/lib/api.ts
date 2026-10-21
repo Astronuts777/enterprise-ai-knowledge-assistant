@@ -92,6 +92,11 @@ const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
   "",
 );
 
+export type BrowserSession = {
+  user_id: string;
+  mode: "development" | "public_demo";
+};
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -110,6 +115,7 @@ async function request<T>(path: string, actorId: string, init?: RequestInit): Pr
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     cache: "no-store",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       "X-Dev-User-Id": actorId,
@@ -122,6 +128,17 @@ async function request<T>(path: string, actorId: string, init?: RequestInit): Pr
   }
 
   return response.json() as Promise<T>;
+}
+
+export async function openBrowserSession(actorId: string): Promise<BrowserSession> {
+  const response = await fetch(`${API_BASE_URL}/v1/session`, {
+    method: "POST",
+    cache: "no-store",
+    credentials: "include",
+    headers: { "X-Dev-User-Id": actorId },
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<BrowserSession>;
 }
 
 export function createTenant(actorId: string, name: string): Promise<Tenant> {
@@ -190,6 +207,7 @@ export async function uploadDocument(
     {
       method: "POST",
       body: form,
+      credentials: "include",
       headers: { "X-Dev-User-Id": actorId },
     },
   );
@@ -210,6 +228,7 @@ export async function uploadDocumentVersion(
     {
       method: "POST",
       body: form,
+      credentials: "include",
       headers: { "X-Dev-User-Id": actorId },
     },
   );

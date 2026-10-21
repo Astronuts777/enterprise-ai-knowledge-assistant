@@ -15,7 +15,7 @@ from enterprise_ai_api.schemas import (
     KnowledgeAnswerResponse,
     KnowledgeQuestionCreate,
 )
-from enterprise_ai_api.tenancy import DevUserId, authorize_tenant_action
+from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -50,7 +50,7 @@ def _response(session: Session, answer: KnowledgeAnswer) -> KnowledgeAnswerRespo
 def ask_knowledge_question(
     tenant_id: UUID,
     payload: KnowledgeQuestionCreate,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> KnowledgeAnswerResponse:
     authorize_tenant_action(
@@ -122,7 +122,7 @@ def ask_knowledge_question(
 )
 def list_question_history(
     tenant_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ) -> list[KnowledgeAnswerResponse]:

@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: enterprise-ai-knowledge-assistant
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: public-demo
+      - key: PUBLIC_DEMO_MODE
+        value: "true"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: enterprise-ai-knowledge-db
+          property: connectionString
+      - key: MIGRATION_DATABASE_URL
+        fromDatabase:
+          name: enterprise-ai-knowledge-db
+          property: connectionString
+      - key: LOCAL_STORAGE_PATH
+        value: /tmp/enterprise-ai-uploads
+
+databases:
+  - name: enterprise-ai-knowledge-db
+    plan: free
+    databaseName: enterprise_ai
+    user: enterprise_ai
+    ipAllowList: []

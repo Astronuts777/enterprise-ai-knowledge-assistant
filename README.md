@@ -127,6 +127,26 @@ DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:
 
 `requirements-dev.txt` 记录直接 Python 依赖，`requirements.lock` 和 `pnpm-lock.yaml` 固定完整依赖解析结果。
 
+## 部署公开演示环境
+
+仓库根目录的 `Dockerfile` 会把 Next.js 静态页面与 FastAPI 打包成同一个服务，
+`render.yaml` 会同时创建 Web 服务和 PostgreSQL。点击下面的入口，用 Render 登录并连接
+GitHub 仓库，然后确认 **Apply** 即可开始首次部署：
+
+[在 Render 创建公开演示环境](https://dashboard.render.com/blueprint/new?repo=https%3A%2F%2Fgithub.com%2FAstronuts777%2Fenterprise-ai-knowledge-assistant)
+
+部署成功后，Render 会显示一个 `https://…onrender.com` 地址，这就是可以分享给其他人的访问链接。
+GitHub `main` 分支后续有新提交时，服务会自动重新部署。
+
+公开演示模式不再信任浏览器提交的用户 UUID，而是给每个浏览器签发服务端签名的 HttpOnly
+会话 Cookie。它仍是产品演示环境，不是正式生产环境；请勿上传真实机密资料。当前免费方案还存在：
+
+- 15 分钟无访问后休眠，首次唤醒可能需要约一分钟；
+- 免费 PostgreSQL 创建 30 天后到期；
+- 上传文件所在的本地磁盘会随休眠、重启或重新部署而清空，但已解析的文本块仍保存在数据库中。
+
+正式给企业用户使用前，应升级持久数据库与对象存储，并接入企业 SSO、域名和备份策略。
+
 ## 文档
 
 - [项目章程](docs/00-project-charter.md)

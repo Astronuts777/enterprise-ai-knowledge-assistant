@@ -1,0 +1,14 @@
+.git
+.github
+.idea
+.venv
+node_modules
+**/node_modules
+**/.next
+data/local
+work
+*.log
+*.db
+.env
+.env.*
+!.env.example

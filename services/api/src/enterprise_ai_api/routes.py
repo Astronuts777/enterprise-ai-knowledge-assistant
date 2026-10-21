@@ -18,7 +18,11 @@ from enterprise_ai_api.schemas import (
     TenantCreate,
     TenantResponse,
 )
-from enterprise_ai_api.tenancy import DevUserId, authorize_tenant_action, ensure_development_user
+from enterprise_ai_api.tenancy import (
+    CurrentUserId,
+    authorize_tenant_action,
+    ensure_development_user,
+)
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -26,7 +30,11 @@ DatabaseSession = Annotated[Session, Depends(get_session)]
 
 
 @router.post("/tenants", response_model=TenantResponse, status_code=status.HTTP_201_CREATED)
-def create_tenant(payload: TenantCreate, user_id: DevUserId, session: DatabaseSession) -> Tenant:
+def create_tenant(
+    payload: TenantCreate,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> Tenant:
     tenant = Tenant(id=uuid4(), name=payload.name)
     set_tenant_context(session, tenant.id)
     ensure_development_user(session, user_id)
@@ -39,7 +47,7 @@ def create_tenant(payload: TenantCreate, user_id: DevUserId, session: DatabaseSe
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantResponse)
-def get_tenant(tenant_id: UUID, user_id: DevUserId, session: DatabaseSession) -> Tenant:
+def get_tenant(tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSession) -> Tenant:
     return authorize_tenant_action(
         session,
         tenant_id=tenant_id,
@@ -56,7 +64,7 @@ def get_tenant(tenant_id: UUID, user_id: DevUserId, session: DatabaseSession) ->
 def add_member(
     tenant_id: UUID,
     payload: MembershipCreate,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> Membership:
     authorize_tenant_action(
@@ -81,7 +89,7 @@ def add_member(
 @router.get("/tenants/{tenant_id}/members", response_model=list[MembershipResponse])
 def list_members(
     tenant_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> list[Membership]:
     authorize_tenant_action(
@@ -107,7 +115,7 @@ def list_members(
 def create_space(
     tenant_id: UUID,
     payload: SpaceCreate,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> Space:
     authorize_tenant_action(
@@ -136,7 +144,7 @@ def create_space(
 
 
 @router.get("/tenants/{tenant_id}/spaces", response_model=list[SpaceResponse])
-def list_spaces(tenant_id: UUID, user_id: DevUserId, session: DatabaseSession) -> list[Space]:
+def list_spaces(tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSession) -> list[Space]:
     authorize_tenant_action(
         session,
         tenant_id=tenant_id,

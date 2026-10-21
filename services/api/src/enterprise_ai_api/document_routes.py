@@ -28,7 +28,7 @@ from enterprise_ai_api.schemas import (
     DocumentUploadResponse,
     DocumentVersionResponse,
 )
-from enterprise_ai_api.tenancy import DevUserId, authorize_tenant_action
+from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -177,7 +177,7 @@ def _add_version(
 async def upload_document(
     tenant_id: UUID,
     space_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
     storage_root: StorageRoot,
     file: UploadedFile,
@@ -228,7 +228,7 @@ async def upload_document(
 async def upload_document_version(
     tenant_id: UUID,
     document_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
     storage_root: StorageRoot,
     file: UploadedFile,
@@ -261,7 +261,7 @@ async def upload_document_version(
 def list_documents(
     tenant_id: UUID,
     space_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> list[DocumentSummary]:
     authorize_tenant_action(
@@ -293,7 +293,7 @@ def list_documents(
 def get_document(
     tenant_id: UUID,
     document_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> DocumentDetail:
     authorize_tenant_action(
@@ -320,7 +320,7 @@ def get_document(
 def preview_document_chunks(
     tenant_id: UUID,
     version_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> list[DocumentChunk]:
     authorize_tenant_action(
@@ -351,7 +351,7 @@ def preview_document_chunks(
 def publish_document_version(
     tenant_id: UUID,
     version_id: UUID,
-    user_id: DevUserId,
+    user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> DocumentVersion:
     authorize_tenant_action(

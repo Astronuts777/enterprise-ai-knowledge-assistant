@@ -22,7 +22,17 @@ DEFAULT_DATABASE_URL = "sqlite:///data/local/enterprise_ai.db"
 
 
 def database_url_from_environment() -> str:
-    return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+    return normalize_database_url(os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL))
+
+
+def normalize_database_url(database_url: str) -> str:
+    """Select the installed psycopg v3 driver for provider-style Postgres URLs."""
+
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
 
 
 def prepare_database(database_url: str) -> None:

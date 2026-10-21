@@ -1,9 +1,12 @@
-"""Tenant-scoped authorization and development identity adapter."""
+"""Tenant-scoped authorization and identity adapters."""
 
+import base64
+import hashlib
+import hmac
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,13 +21,54 @@ from enterprise_ai_core.security import (
     authorize,
 )
 
-DevUserId = Annotated[
-    UUID,
-    Header(
-        alias="X-Dev-User-Id",
-        description="Temporary local-development identity. Replace with verified SSO claims.",
-    ),
-]
+SESSION_COOKIE_NAME = "enterprise_ai_demo_session"
+
+
+def sign_demo_session(user_id: UUID, secret: str) -> str:
+    payload = str(user_id)
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    return f"{payload}.{encoded_signature}"
+
+
+def verify_demo_session(token: str | None, secret: str) -> UUID | None:
+    if not token:
+        return None
+    try:
+        payload, encoded_signature = token.rsplit(".", 1)
+        user_id = UUID(payload)
+    except (ValueError, TypeError):
+        return None
+    expected = sign_demo_session(user_id, secret).rsplit(".", 1)[1]
+    if not hmac.compare_digest(encoded_signature, expected):
+        return None
+    return user_id
+
+
+def current_user_id(
+    request: Request,
+    development_user_id: Annotated[UUID | None, Header(alias="X-Dev-User-Id")] = None,
+    demo_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
+) -> UUID:
+    """Resolve a local dev header or a server-signed public-demo browser session."""
+
+    if request.app.state.public_demo:
+        user_id = verify_demo_session(demo_session, request.app.state.session_secret)
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="A valid demo session is required",
+            )
+        return user_id
+    if development_user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Dev-User-Id is required for local development",
+        )
+    return development_user_id
+
+
+CurrentUserId = Annotated[UUID, Depends(current_user_id)]
 
 
 def ensure_development_user(session: Session, user_id: UUID) -> User:
