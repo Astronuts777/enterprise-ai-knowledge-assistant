@@ -15,6 +15,7 @@ from enterprise_ai_api.database import (
 )
 from enterprise_ai_api.document_routes import router as document_router
 from enterprise_ai_api.document_routes import storage_root_from_environment
+from enterprise_ai_api.question_routes import router as question_router
 from enterprise_ai_api.routes import router
 
 
@@ -69,6 +70,7 @@ def create_app(database_url: str | None = None, storage_root: str | None = None)
 
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
+    application.include_router(question_router, tags=["knowledge-answers"])
     return application
 
 

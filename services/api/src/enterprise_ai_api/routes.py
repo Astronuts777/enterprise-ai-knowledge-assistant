@@ -33,6 +33,7 @@ def create_tenant(payload: TenantCreate, user_id: DevUserId, session: DatabaseSe
     session.add(tenant)
     session.add(Membership(tenant_id=tenant.id, user_id=user_id, role="enterprise_admin"))
     session.commit()
+    set_tenant_context(session, tenant.id)
     session.refresh(tenant)
     return tenant
 
@@ -72,6 +73,7 @@ def add_member(
     else:
         membership.role = payload.role
     session.commit()
+    set_tenant_context(session, tenant_id)
     session.refresh(membership)
     return membership
 
@@ -128,6 +130,7 @@ def create_space(
             status_code=status.HTTP_409_CONFLICT,
             detail="A space with this name already exists in the tenant",
         ) from error
+    set_tenant_context(session, tenant_id)
     session.refresh(space)
     return space
 

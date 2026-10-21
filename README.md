@@ -34,6 +34,8 @@ pnpm dev:web
 - 添加企业成员并分配企业管理员、知识管理员或普通成员角色。
 - 在知识空间中上传、解析和发布 PDF、DOCX、TXT 与 Markdown。
 - 为同一逻辑文档上传新版本，旧发布版本会保留并标记为已替代。
+- 对已发布资料提问，获得带文件、版本和页码/段落定位的证据式回答。
+- 在证据不足时明确拒答，并保存每个用户自己的问答历史。
 - 在前端直接显示 API 权限错误和跨租户拒绝结果。
 
 Web 默认连接 `http://localhost:8000`。需要修改 API 地址时，复制
@@ -69,6 +71,8 @@ GET  /v1/tenants/{tenant_id}/documents/{document_id}
 POST /v1/tenants/{tenant_id}/documents/{document_id}/versions
 GET  /v1/tenants/{tenant_id}/document-versions/{version_id}/chunks
 POST /v1/tenants/{tenant_id}/document-versions/{version_id}/publish
+POST /v1/tenants/{tenant_id}/questions
+GET  /v1/tenants/{tenant_id}/questions
 ```
 
 未设置 `DATABASE_URL` 时，API 使用持久化 SQLite：业务记录保存在
@@ -92,6 +96,11 @@ curl -X POST http://localhost:8000/v1/tenants \
 
 当前 10 MB 以内的文档在请求内完成首轮解析，以便验证完整链路。进入大文件、OCR 和批量导入
 阶段后，解析将迁移到已有 Worker 边界，避免阻塞 API。
+
+当前问答采用透明、可重复的本地关键词检索，只读取状态为“已发布”的版本。命中时由原文摘录
+组成答案并附带不可变引用快照；没有充分命中时返回“资料不足”，不会调用外部模型或虚构答案。
+下一阶段可在保持相同权限、拒答和引用契约的前提下，将检索升级为 pgvector 混合检索，并接入
+可配置的大模型生成层。
 
 ### 本地依赖服务
 

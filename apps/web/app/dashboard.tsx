@@ -6,15 +6,18 @@ import {
   ApiError,
   Classification,
   DocumentSummary,
+  KnowledgeAnswer,
   Membership,
   MembershipRole,
   Space,
   Tenant,
+  askKnowledgeQuestion,
   createSpace,
   createTenant,
   getTenant,
   listDocuments,
   listMembers,
+  listQuestionHistory,
   listSpaces,
   publishDocumentVersion,
   saveMember,
@@ -22,7 +25,7 @@ import {
   uploadDocumentVersion,
 } from "../lib/api";
 
-type View = "overview" | "spaces" | "documents" | "members";
+type View = "overview" | "assistant" | "spaces" | "documents" | "members";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -39,9 +42,10 @@ const classificationLabels: Record<Classification, string> = {
   restricted: "严格受限",
 };
 
-function Icon({ name }: { name: "home" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" | "file" | "upload" | "back" }) {
+function Icon({ name }: { name: "home" | "assistant" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" | "file" | "upload" | "back" | "send" | "quote" }) {
   const paths: Record<typeof name, ReactNode> = {
     home: <><path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5M9 21v-7h6v7" /></>,
+    assistant: <><path d="m12 3 1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4L12 3Z" /><path d="m19 14 .8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14Z" /><path d="M5 15v6M2 18h6" /></>,
     spaces: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 9v11" /></>,
     members: <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.09A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.09 14H3v-4h.09A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.02A1.7 1.7 0 0 0 10 3.09V3h4v.09a1.7 1.7 0 0 0 1 1.54 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9v.02A1.7 1.7 0 0 0 20.91 10H21v4h-.09A1.7 1.7 0 0 0 19.4 15Z" /></>,
@@ -51,6 +55,8 @@ function Icon({ name }: { name: "home" | "spaces" | "members" | "settings" | "pl
     file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 13h8M8 17h6" /></>,
     upload: <><path d="M12 16V4M7 9l5-5 5 5" /><path d="M5 20h14" /></>,
     back: <path d="m15 18-6-6 6-6" />,
+    send: <><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></>,
+    quote: <><path d="M10 11H5a4 4 0 0 0 4 4v4H5v-4a8 8 0 0 1 5-8v4ZM22 11h-5a4 4 0 0 0 4 4v4h-4v-4a8 8 0 0 1 5-8v4Z" /></>,
   };
   return <svg aria-hidden="true" className="icon" viewBox="0 0 24 24">{paths[name]}</svg>;
 }
@@ -69,12 +75,20 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatLocator(value: string): string {
+  const [kind, position] = value.split(":");
+  if (kind === "page") return `第 ${position} 页`;
+  if (kind === "paragraph") return `第 ${position} 段`;
+  return value;
+}
+
 export default function Dashboard() {
   const [actorId, setActorId] = useState("");
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [documentsBySpace, setDocumentsBySpace] = useState<Record<string, DocumentSummary[]>>({});
+  const [answers, setAnswers] = useState<KnowledgeAnswer[]>([]);
   const [activeSpace, setActiveSpace] = useState<Space | null>(null);
   const [members, setMembers] = useState<Membership[]>([]);
   const [canManageMembers, setCanManageMembers] = useState(true);
@@ -88,12 +102,14 @@ export default function Dashboard() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadWorkspace = useCallback(async (userId: string, organizationId: string) => {
-    const [loadedTenant, loadedSpaces] = await Promise.all([
+    const [loadedTenant, loadedSpaces, loadedAnswers] = await Promise.all([
       getTenant(userId, organizationId),
       listSpaces(userId, organizationId),
+      listQuestionHistory(userId, organizationId),
     ]);
     setTenant(loadedTenant);
     setSpaces(loadedSpaces);
+    setAnswers(loadedAnswers);
     const documentEntries = await Promise.all(
       loadedSpaces.map(async (space) => [
         space.id,
@@ -267,6 +283,23 @@ export default function Dashboard() {
     }
   }
 
+  async function handleAskQuestion(question: string, spaceId?: string) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const answer = await askKnowledgeQuestion(actorId, tenantId, {
+        question,
+        ...(spaceId ? { space_ids: [spaceId] } : {}),
+      });
+      setAnswers((current) => [answer, ...current]);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "获取回答失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openSpace(space: Space) {
     setActiveSpace(space);
     setView("documents");
@@ -278,6 +311,7 @@ export default function Dashboard() {
     setTenant(null);
     setSpaces([]);
     setDocumentsBySpace({});
+    setAnswers([]);
     setActiveSpace(null);
     setMembers([]);
     setView("overview");
@@ -321,8 +355,9 @@ export default function Dashboard() {
     );
   }
 
-  const navItems: { key: View; label: string; icon: "home" | "spaces" | "members" }[] = [
+  const navItems: { key: View; label: string; icon: "home" | "assistant" | "spaces" | "members" }[] = [
     { key: "overview", label: "总览", icon: "home" },
+    { key: "assistant", label: "AI 决策助手", icon: "assistant" },
     { key: "spaces", label: "知识空间", icon: "spaces" },
     { key: "members", label: "成员与权限", icon: "members" },
   ];
@@ -357,7 +392,16 @@ export default function Dashboard() {
         <div className="content">
           {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
           {view === "overview" && (
-            <Overview tenant={tenant} spaces={spaces} members={members} documentsBySpace={documentsBySpace} onCreateSpace={() => setSpaceDialog(true)} onViewSpaces={() => setView("spaces")} onOpenSpace={openSpace} />
+            <Overview tenant={tenant} spaces={spaces} members={members} answers={answers} documentsBySpace={documentsBySpace} onCreateSpace={() => setSpaceDialog(true)} onViewSpaces={() => setView("spaces")} onOpenSpace={openSpace} onOpenAssistant={() => setView("assistant")} />
+          )}
+          {view === "assistant" && (
+            <AssistantView
+              answers={answers}
+              spaces={spaces}
+              documentsBySpace={documentsBySpace}
+              busy={busy}
+              onAsk={handleAskQuestion}
+            />
           )}
           {view === "spaces" && (
             <SpacesView spaces={spaces} documentsBySpace={documentsBySpace} onCreate={() => setSpaceDialog(true)} onOpen={openSpace} />
@@ -412,10 +456,10 @@ export default function Dashboard() {
   );
 }
 
-function Overview({ tenant, spaces, members, documentsBySpace, onCreateSpace, onViewSpaces, onOpenSpace }: { tenant: Tenant; spaces: Space[]; members: Membership[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreateSpace: () => void; onViewSpaces: () => void; onOpenSpace: (space: Space) => void }) {
+function Overview({ tenant, spaces, members, answers, documentsBySpace, onCreateSpace, onViewSpaces, onOpenSpace, onOpenAssistant }: { tenant: Tenant; spaces: Space[]; members: Membership[]; answers: KnowledgeAnswer[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreateSpace: () => void; onViewSpaces: () => void; onOpenSpace: (space: Space) => void; onOpenAssistant: () => void }) {
   const documents = Object.values(documentsBySpace).flat();
   const publishedCount = documents.filter((item) => item.latest_version.status === "published").length;
-  const completedSteps = (spaces.length > 0 ? 1 : 0) + (documents.length > 0 ? 1 : 0);
+  const completedSteps = (spaces.length > 0 ? 1 : 0) + (documents.length > 0 ? 1 : 0) + (answers.length > 0 ? 1 : 0);
   return <>
     <div className="page-heading"><div><p className="kicker">工作区总览</p><h1>早上好，{tenant.name}</h1><p>你的可信知识基础已经建立。下一步，从创建空间并导入第一份企业资料开始。</p></div><button className="primary-button" onClick={onCreateSpace}><Icon name="plus" />创建知识空间</button></div>
     <section className="stats-grid" aria-label="工作区统计">
@@ -429,12 +473,45 @@ function Overview({ tenant, spaces, members, documentsBySpace, onCreateSpace, on
         <ol>
           <li className={spaces.length > 0 ? "done" : "current"}><i>{spaces.length > 0 ? "✓" : "1"}</i><div><b>创建知识空间</b><span>为政策、项目或部门划分安全边界</span></div>{spaces.length === 0 && <button onClick={onCreateSpace}>现在创建</button>}</li>
           <li className={documents.length > 0 ? "done" : spaces.length > 0 ? "current" : ""}><i>{documents.length > 0 ? "✓" : "2"}</i><div><b>导入企业资料</b><span>上传 PDF、DOCX、Markdown 或文本</span></div>{spaces.length > 0 && documents.length === 0 ? <button onClick={() => onOpenSpace(spaces[0])}>现在导入</button> : <em>{documents.length ? "已完成" : "等待空间"}</em>}</li>
-          <li><i>3</i><div><b>提出第一个问题</b><span>获得带原文引用的可信回答</span></div><em>下一阶段</em></li>
+          <li className={answers.length > 0 ? "done" : publishedCount > 0 ? "current" : ""}><i>{answers.length > 0 ? "✓" : "3"}</i><div><b>提出第一个问题</b><span>获得带原文引用的可信回答</span></div>{publishedCount > 0 && answers.length === 0 ? <button onClick={onOpenAssistant}>现在提问</button> : <em>{answers.length ? "已完成" : "等待发布资料"}</em>}</li>
         </ol>
       </article>
       <article className="card spaces-summary"><div className="card-head"><div><p className="kicker">知识空间</p><h2>最近空间</h2></div><button onClick={onViewSpaces}>查看全部</button></div>
         {spaces.length === 0 ? <div className="empty-mini"><span><Icon name="spaces" /></span><b>还没有知识空间</b><p>创建一个空间，开始组织企业知识。</p></div> : <ul>{spaces.slice(0, 4).map((space) => <li key={space.id} onClick={() => onOpenSpace(space)}><span className={`classification ${space.classification}`}>{space.name.slice(0, 1)}</span><div><b>{space.name}</b><small>{classificationLabels[space.classification]} · {documentsBySpace[space.id]?.length ?? 0} 份资料</small></div><Icon name="arrow" /></li>)}</ul>}
       </article>
+    </section>
+  </>;
+}
+
+function AssistantView({ answers, spaces, documentsBySpace, busy, onAsk }: { answers: KnowledgeAnswer[]; spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; busy: boolean; onAsk: (question: string, spaceId?: string) => Promise<void> }) {
+  const [question, setQuestion] = useState("");
+  const [spaceId, setSpaceId] = useState("");
+  const publishedCount = Object.values(documentsBySpace)
+    .flat()
+    .filter((item) => item.latest_version.status === "published").length;
+  const suggestions = ["公司的远程办公政策是什么？", "哪些事项需要审批？", "请总结已发布资料中的关键要求。"];
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const value = question.trim();
+    if (!value) return;
+    await onAsk(value, spaceId || undefined);
+    setQuestion("");
+  }
+
+  return <>
+    <div className="page-heading assistant-heading"><div><p className="kicker">证据优先</p><h1>AI 决策助手</h1><p>只基于已发布的企业资料回答，并为每项结论保留原文位置。</p></div><span className="assistant-mode"><i />本地证据模式</span></div>
+    <section className="assistant-layout">
+      <div className="assistant-main">
+        <form className="question-composer" onSubmit={submit}>
+          <div className="composer-top"><span><Icon name="assistant" />向企业知识提问</span><select aria-label="限定知识空间" value={spaceId} onChange={(event) => setSpaceId(event.target.value)}><option value="">全部知识空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></div>
+          <textarea aria-label="问题" maxLength={1000} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：远程办公需要谁批准？" rows={4} value={question} />
+          <div className="composer-actions"><small>{publishedCount ? `正在检索 ${publishedCount} 份已发布资料` : "尚无已发布资料，助手会明确提示依据不足"}</small><button className="primary-button" disabled={busy || question.trim().length < 2} type="submit">{busy ? "检索证据中…" : "获取可信回答"}<Icon name="send" /></button></div>
+        </form>
+
+        {answers.length === 0 ? <section className="assistant-empty"><span><Icon name="assistant" /></span><h2>从一个具体问题开始</h2><p>问题越明确，原文定位越准确。只有已发布版本会进入检索范围。</p><div>{suggestions.map((suggestion) => <button key={suggestion} onClick={() => setQuestion(suggestion)} type="button">{suggestion}</button>)}</div></section> : <section className="answer-history" aria-label="问答历史">{answers.map((item) => <article className="answer-card" key={item.id}><div className="question-row"><span>你</span><div><small>{formatDate(item.created_at)}</small><h2>{item.question}</h2></div></div><div className="answer-row"><span><Icon name="assistant" /></span><div><div className="answer-meta"><b>证据式回答</b><em className={item.status}>{item.status === "grounded" ? `${item.citations.length} 条引用` : "依据不足"}</em></div><p>{item.answer}</p>{item.citations.length > 0 && <div className="citations"><h3><Icon name="quote" />原文依据</h3>{item.citations.map((citation) => <blockquote key={citation.citation_number}><span>[{citation.citation_number}]</span><div><b>{citation.document_title}</b><small>v{citation.version_number} · {formatLocator(citation.locator)} · {citation.filename}</small><p>{citation.excerpt}</p></div></blockquote>)}</div>}</div></div></article>)}</section>}
+      </div>
+      <aside className="assistant-guide"><p className="kicker">可信边界</p><h2>这个助手会做什么</h2><ul><li><Icon name="shield" /><div><b>只读已发布资料</b><span>草稿、失败版本和已替代版本不会参与回答。</span></div></li><li><Icon name="quote" /><div><b>保留原文位置</b><span>每条引用显示文件、版本、页码或段落。</span></div></li><li><Icon name="assistant" /><div><b>没有证据就拒答</b><span>当前使用透明的本地检索，不调用外部模型。</span></div></li></ul></aside>
     </section>
   </>;
 }

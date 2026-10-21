@@ -61,6 +61,32 @@ export type DocumentUpload = {
   version: DocumentVersion;
 };
 
+export type AnswerStatus = "grounded" | "insufficient_evidence";
+
+export type AnswerCitation = {
+  citation_number: number;
+  document_id: string;
+  document_version_id: string;
+  document_chunk_id: string;
+  document_title: string;
+  filename: string;
+  version_number: number;
+  locator: string;
+  excerpt: string;
+  relevance_score: number;
+};
+
+export type KnowledgeAnswer = {
+  id: string;
+  tenant_id: string;
+  created_by: string;
+  question: string;
+  answer: string;
+  status: AnswerStatus;
+  citations: AnswerCitation[];
+  created_at: string;
+};
+
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(
   /\/$/,
   "",
@@ -201,4 +227,22 @@ export function publishDocumentVersion(
     actorId,
     { method: "POST" },
   );
+}
+
+export function askKnowledgeQuestion(
+  actorId: string,
+  tenantId: string,
+  input: { question: string; space_ids?: string[] },
+): Promise<KnowledgeAnswer> {
+  return request<KnowledgeAnswer>(`/v1/tenants/${tenantId}/questions`, actorId, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listQuestionHistory(
+  actorId: string,
+  tenantId: string,
+): Promise<KnowledgeAnswer[]> {
+  return request<KnowledgeAnswer[]>(`/v1/tenants/${tenantId}/questions`, actorId);
 }

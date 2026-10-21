@@ -105,3 +105,34 @@ class DocumentChunkResponse(BaseModel):
     position: int
     locator: str
     text: str
+
+
+class KnowledgeQuestionCreate(BaseModel):
+    question: str = Field(min_length=2, max_length=1000)
+    space_ids: list[UUID] | None = Field(default=None, max_length=50)
+
+
+class AnswerCitationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    citation_number: int
+    document_id: UUID
+    document_version_id: UUID
+    document_chunk_id: UUID
+    document_title: str
+    filename: str
+    version_number: int
+    locator: str
+    excerpt: str
+    relevance_score: float
+
+
+class KnowledgeAnswerResponse(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    created_by: UUID
+    question: str
+    answer: str
+    status: Literal["grounded", "insufficient_evidence"]
+    citations: list[AnswerCitationResponse]
+    created_at: datetime

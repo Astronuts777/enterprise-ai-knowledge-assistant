@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from enterprise_ai_api.database import get_session
+from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.document_processing import (
     MAX_UPLOAD_BYTES,
     DocumentProcessingError,
@@ -164,6 +164,7 @@ def _add_version(
         session.rollback()
         target.unlink(missing_ok=True)
         raise
+    set_tenant_context(session, tenant_id)
     session.refresh(version)
     return version
 
@@ -383,6 +384,7 @@ def publish_document_version(
     version.status = "published"
     version.published_at = datetime.now(UTC)
     session.commit()
+    set_tenant_context(session, tenant_id)
     session.refresh(version)
     return version
 

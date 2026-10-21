@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -138,3 +139,52 @@ class DocumentChunk(Base):
     locator: Mapped[str] = mapped_column(String(160))
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class KnowledgeAnswer(Base):
+    __tablename__ = "knowledge_answers"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('grounded', 'insufficient_evidence')",
+            name="ck_knowledge_answers_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AnswerCitation(Base):
+    __tablename__ = "answer_citations"
+    __table_args__ = (
+        UniqueConstraint("answer_id", "citation_number", name="uq_answer_citations_number"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    answer_id: Mapped[UUID] = mapped_column(
+        ForeignKey("knowledge_answers.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    document_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_versions.id", ondelete="CASCADE")
+    )
+    document_chunk_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_chunks.id", ondelete="CASCADE")
+    )
+    citation_number: Mapped[int] = mapped_column(Integer)
+    document_title: Mapped[str] = mapped_column(String(255))
+    filename: Mapped[str] = mapped_column(String(255))
+    version_number: Mapped[int] = mapped_column(Integer)
+    locator: Mapped[str] = mapped_column(String(160))
+    excerpt: Mapped[str] = mapped_column(Text)
+    relevance_score: Mapped[float] = mapped_column(Float)
