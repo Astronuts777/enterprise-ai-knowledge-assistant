@@ -267,7 +267,7 @@ git push -u origin codex/feature-name
 
 备份时先停止 API，再复制整个 `data/local/`。需要全新环境时，将该目录移动到备份位置后重启 API。
 
-### PostgreSQL 与 MinIO 模式
+### PostgreSQL 与 MinIO 持久对象存储模式
 
 安装 Docker 后启动依赖：
 
@@ -275,19 +275,39 @@ git push -u origin codex/feature-name
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-执行迁移并启动 API：
+Compose 会自动创建私有的 `enterprise-ai-documents` 存储桶。执行迁移并启动 API：
 
 ```bash
 MIGRATION_DATABASE_URL='postgresql+psycopg://app_owner:local-development-only@localhost:5432/enterprise_ai' \
   .venv/bin/alembic upgrade head
 
 DATABASE_URL='postgresql+psycopg://app_runtime:local-development-only@localhost:5432/enterprise_ai' \
+  OBJECT_STORAGE_BACKEND=s3 \
+  OBJECT_STORAGE_ENDPOINT='http://localhost:9000' \
+  OBJECT_STORAGE_ACCESS_KEY='enterprise-ai-local' \
+  OBJECT_STORAGE_SECRET_KEY='local-development-only' \
+  OBJECT_STORAGE_BUCKET='enterprise-ai-documents' \
+  OBJECT_STORAGE_REGION='us-east-1' \
+  OBJECT_STORAGE_FORCE_PATH_STYLE=true \
   PYTHONPATH=services/api/src:packages/core/src \
   .venv/bin/uvicorn enterprise_ai_api.main:app --reload
 ```
 
 PostgreSQL 迁移会启用并强制执行租户行级安全。应用层仍执行显式授权，形成应用和数据库两层隔离。
-当前业务上传仍使用 `LOCAL_STORAGE_PATH`；MinIO 是后续对象存储接入的本地依赖边界。
+上传对象在进入 MinIO 前已经由应用使用 AES-256-GCM 加密；存储桶必须保持私有。数据库只保存稳定的
+对象键，不保存供应商 URL，因此正式环境可以使用 AWS S3、Cloudflare R2、Backblaze B2 或其他
+S3 兼容服务，而不改变业务数据模型。
+
+### 正式环境对象存储切换
+
+1. 在对象存储服务商创建私有存储桶和最小权限服务账号。
+2. 权限只授予目标存储桶的读取、写入和删除对象能力，不授予公开访问或账号管理权限。
+3. 在部署平台设置 `OBJECT_STORAGE_BACKEND=s3` 以及下表中的 S3 参数；密钥只存于平台 Secret。
+4. 先在测试环境上传文件，确认数据库 `object_key` 对应的对象存在且内容以 `EAKA1` 加密头开头。
+5. 再切换生产环境。切换前已有的本地对象必须先复制到目标存储桶，并保持对象键不变。
+
+应用在 S3 配置缺失时拒绝启动；上传失败时返回 503 并回滚数据库，数据库提交失败时会尽力删除
+刚写入的对象。对象存储不可用不会产生一个“数据库显示成功但原件不存在”的新文档版本。
 
 ## 环境变量
 
@@ -299,6 +319,15 @@ PostgreSQL 迁移会启用并强制执行租户行级安全。应用层仍执行
 | `DATABASE_URL` | API 运行数据库 | 本地 SQLite |
 | `MIGRATION_DATABASE_URL` | Alembic 迁移数据库 | `alembic.ini` 中的本地 PostgreSQL |
 | `LOCAL_STORAGE_PATH` | 上传文件目录 | `data/local/uploads` |
+| `OBJECT_STORAGE_BACKEND` | 文件后端：`local` 或 `s3` | `local` |
+| `OBJECT_STORAGE_ENDPOINT` | S3 兼容 API 地址；AWS S3 留空 | 无 |
+| `OBJECT_STORAGE_ACCESS_KEY` | 对象存储访问密钥 ID | 无 |
+| `OBJECT_STORAGE_SECRET_KEY` | 对象存储访问密钥 Secret | 无 |
+| `OBJECT_STORAGE_BUCKET` | 私有文件存储桶 | 无 |
+| `OBJECT_STORAGE_REGION` | 存储区域 | `us-east-1` |
+| `OBJECT_STORAGE_PREFIX` | 同一存储桶内的环境隔离前缀 | 无 |
+| `OBJECT_STORAGE_FORCE_PATH_STYLE` | MinIO 等服务是否强制 path-style URL | `false` |
+| `OBJECT_STORAGE_SSE` | 可选服务端加密算法，例如 AWS 的 `AES256` | 无 |
 | `CORS_ORIGINS` | 允许访问 API 的 Web 来源，逗号分隔 | 本地 3000–3002 端口 |
 | `PUBLIC_DEMO_MODE` | 启用签名浏览器演示会话 | `false` |
 | `SESSION_SECRET` | 公开演示会话签名密钥 | 无；演示模式必须设置 |
@@ -356,6 +385,10 @@ curl -X POST http://localhost:8000/v1/tenants \
 - `ACCOUNT_AUTH_MODE` 和独立生成的 `ENCRYPTION_MASTER_KEY`；
 - `/healthz` 健康检查。
 
+仓库已经支持 S3 兼容持久对象存储，但 Render Blueprint 默认仍保留 `OBJECT_STORAGE_BACKEND=local`
+作为不保存真实资料的公开演示模式。正式使用前必须在 Render Secret 中设置对象存储凭据并把后端改为
+`s3`；不要把访问密钥提交到 `render.yaml` 或 Git。
+
 一键创建：
 
 [在 Render 创建 Blueprint](https://dashboard.render.com/blueprint/new?repo=https%3A%2F%2Fgithub.com%2FAstronuts777%2Fenterprise-ai-knowledge-assistant)
@@ -373,7 +406,7 @@ curl -X POST http://localhost:8000/v1/tenants \
 
 - 闲置 15 分钟后休眠，首次唤醒可能需要约一分钟；
 - 免费 PostgreSQL 创建 30 天后到期；
-- Web 服务文件系统是临时的，上传原件可能在休眠、重启或重新部署后消失；
+- Blueprint 默认的本地文件后端是临时的，上传原件可能在休眠、重启或重新部署后消失；
 - 已解析的文本块保存在 PostgreSQL，但缺少原件时不能视为完整的生产证据链。
 
 正式生产部署必须使用持久对象存储和长期数据库，并接入企业 SSO、备份恢复、密钥管理、审计、

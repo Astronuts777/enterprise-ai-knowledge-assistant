@@ -18,7 +18,7 @@ from enterprise_ai_api.database import (
     prepare_database,
 )
 from enterprise_ai_api.document_routes import router as document_router
-from enterprise_ai_api.document_routes import storage_root_from_environment
+from enterprise_ai_api.object_storage import ObjectStorage, object_storage_from_environment
 from enterprise_ai_api.question_routes import router as question_router
 from enterprise_ai_api.routes import router
 from enterprise_ai_api.tenancy import (
@@ -59,6 +59,7 @@ def create_app(
     database_url: str | None = None,
     storage_root: str | None = None,
     *,
+    object_storage: ObjectStorage | None = None,
     public_demo: bool | None = None,
     account_auth: bool | None = None,
     session_secret: str | None = None,
@@ -90,10 +91,12 @@ def create_app(
     require_production_key()
     if application.state.public_demo and not application.state.session_secret:
         raise RuntimeError("SESSION_SECRET is required when PUBLIC_DEMO_MODE is enabled")
-    application.state.storage_root = (
-        storage_root_from_environment() if storage_root is None else Path(storage_root).resolve()
+    local_root = Path(storage_root).resolve() if storage_root is not None else None
+    application.state.object_storage = (
+        object_storage
+        if object_storage is not None
+        else object_storage_from_environment(local_root=local_root)
     )
-    application.state.storage_root.mkdir(parents=True, exist_ok=True)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins_from_environment(),

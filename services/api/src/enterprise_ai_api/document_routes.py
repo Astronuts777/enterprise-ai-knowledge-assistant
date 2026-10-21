@@ -1,9 +1,9 @@
 """Permission-aware document upload, version, preview, and publication endpoints."""
 
 import mimetypes
-import os
+from contextlib import suppress
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -21,6 +21,7 @@ from enterprise_ai_api.document_processing import (
     validate_extension,
 )
 from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
+from enterprise_ai_api.object_storage import ObjectStorage, ObjectStorageError
 from enterprise_ai_api.schemas import (
     DocumentChunkResponse,
     DocumentDetail,
@@ -37,11 +38,11 @@ UploadedFile = Annotated[UploadFile, File(description="PDF, DOCX, TXT, or Markdo
 DocumentTitle = Annotated[str | None, Form(max_length=255)]
 
 
-def get_storage_root(request: Request) -> Path:
-    return request.app.state.storage_root
+def get_object_storage(request: Request) -> ObjectStorage:
+    return request.app.state.object_storage
 
 
-StorageRoot = Annotated[Path, Depends(get_storage_root)]
+Storage = Annotated[ObjectStorage, Depends(get_object_storage)]
 
 
 def _space_or_404(session: Session, tenant_id: UUID, space_id: UUID) -> Space:
@@ -89,7 +90,7 @@ async def _read_upload(file: UploadFile) -> tuple[str, str, bytes]:
 def _add_version(
     session: Session,
     *,
-    storage_root: Path,
+    object_storage: ObjectStorage,
     tenant_id: UUID,
     document: Document,
     user_id: UUID,
@@ -118,11 +119,18 @@ def _add_version(
     )
     version_id = uuid4()
     version_number = (latest_number or 0) + 1
-    object_key = str(Path(str(tenant_id)) / str(document.id) / str(version_id) / "payload.enc")
-    target = storage_root / object_key
-    target.parent.mkdir(parents=True, exist_ok=True)
+    object_key = str(
+        PurePosixPath(str(tenant_id), str(document.id), str(version_id), "payload.enc")
+    )
     encryption_context = f"{tenant_id}:{document.id}:{version_id}".encode()
-    target.write_bytes(encrypt_bytes(content, context=encryption_context))
+    try:
+        object_storage.put(object_key, encrypt_bytes(content, context=encryption_context))
+    except ObjectStorageError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Encrypted object storage is temporarily unavailable",
+        ) from error
 
     try:
         parsed_chunks = parse_document(content, extension)
@@ -164,7 +172,8 @@ def _add_version(
         session.commit()
     except Exception:
         session.rollback()
-        target.unlink(missing_ok=True)
+        with suppress(ObjectStorageError):
+            object_storage.delete(object_key)
         raise
     set_tenant_context(session, tenant_id)
     session.refresh(version)
@@ -181,7 +190,7 @@ async def upload_document(
     space_id: UUID,
     user_id: CurrentUserId,
     session: DatabaseSession,
-    storage_root: StorageRoot,
+    object_storage: Storage,
     file: UploadedFile,
     title: DocumentTitle = None,
 ) -> DocumentUploadResponse:
@@ -210,7 +219,7 @@ async def upload_document(
     session.flush()
     version = _add_version(
         session,
-        storage_root=storage_root,
+        object_storage=object_storage,
         tenant_id=tenant_id,
         document=document,
         user_id=user_id,
@@ -232,7 +241,7 @@ async def upload_document_version(
     document_id: UUID,
     user_id: CurrentUserId,
     session: DatabaseSession,
-    storage_root: StorageRoot,
+    object_storage: Storage,
     file: UploadedFile,
 ) -> DocumentVersion:
     authorize_tenant_action(
@@ -245,7 +254,7 @@ async def upload_document_version(
     filename, extension, content = await _read_upload(file)
     return _add_version(
         session,
-        storage_root=storage_root,
+        object_storage=object_storage,
         tenant_id=tenant_id,
         document=document,
         user_id=user_id,
@@ -389,8 +398,3 @@ def publish_document_version(
     set_tenant_context(session, tenant_id)
     session.refresh(version)
     return version
-
-
-def storage_root_from_environment() -> Path:
-    configured = os.getenv("LOCAL_STORAGE_PATH")
-    return Path(configured).resolve() if configured else Path("data/local/uploads").resolve()

@@ -25,6 +25,10 @@ services:
           property: connectionString
       - key: LOCAL_STORAGE_PATH
         value: /tmp/enterprise-ai-uploads
+      # Keep `local` only for the public demo. Set this to `s3` and add the private
+      # OBJECT_STORAGE_* secrets in Render before accepting real enterprise files.
+      - key: OBJECT_STORAGE_BACKEND
+        value: local
 
 databases:
   - name: enterprise-ai-knowledge-db

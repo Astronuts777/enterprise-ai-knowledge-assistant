@@ -96,6 +96,9 @@ flowchart LR
 
 ## 6. 文档导入流程
 
+当前实现使用 S3 兼容私有存储桶保存经应用层 AES-256-GCM 加密后的原件；本地开发可以切换为原子文件
+后端。数据库中的 `object_key` 与供应商无关，便于在 AWS S3、R2、B2 和 MinIO 之间迁移。
+
 ```mermaid
 sequenceDiagram
     participant K as 知识管理员
