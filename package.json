@@ -1,0 +1,12 @@
+{
+  "name": "enterprise-ai-knowledge-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @enterprise-ai/web dev",
+    "build:web": "pnpm --filter @enterprise-ai/web build",
+    "lint:web": "pnpm --filter @enterprise-ai/web lint",
+    "test:web": "pnpm --filter @enterprise-ai/web typecheck"
+  }
+}

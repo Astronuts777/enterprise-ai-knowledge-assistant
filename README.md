@@ -15,7 +15,42 @@
 
 ## 当前阶段
 
-项目处于 MVP 定义与架构设计阶段。首个跨行业工作流、P0 范围、用户故事和系统架构已经形成；初始技术栈仍需人工确认，尚未进入功能开发。
+项目已进入 MVP 基础开发阶段。首个跨行业工作流、P0 范围、用户故事、系统架构和初始技术栈已经确认，当前正在建立权限优先的纵向功能切片。
+
+## 本地开发
+
+### Web
+
+```bash
+pnpm install
+pnpm dev:web
+```
+
+访问 `http://localhost:3000`。
+
+### API 与测试
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.lock
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+.venv/bin/uvicorn enterprise_ai_api.main:app --app-dir services/api/src --reload
+```
+
+API 健康检查位于 `http://localhost:8000/healthz`。
+
+### 本地依赖服务
+
+安装 Docker 后运行：
+
+```bash
+docker compose -f infra/docker-compose.yml up -d
+```
+
+这将启动带 pgvector 的 PostgreSQL 和 S3 兼容对象存储。`.env.example` 中仅包含本地开发占位凭据，不得用于共享或生产环境。
+
+`requirements-dev.txt` 记录直接 Python 依赖，`requirements.lock` 和 `pnpm-lock.yaml` 固定完整依赖解析结果。
 
 ## 文档
 
@@ -30,12 +65,10 @@
 
 ## 计划阶段
 
-1. 确认初始技术栈
-2. 创建前端、API、Worker 和本地依赖骨架
-3. 实现企业、成员、知识空间和权限基础
-4. 完成文档上传、解析、版本和发布流程
-5. 完成权限感知检索、引用问答和拒答
-6. 完成决策证据包、审批和审计
-7. 建立评测集、安全门禁和持续集成
-8. 部署测试环境并开展用户验证
+1. 实现企业、成员、知识空间和数据库行级安全
+2. 完成文档上传、解析、版本和发布流程
+3. 完成权限感知检索、引用问答和拒答
+4. 完成决策证据包、审批和审计
+5. 建立评测集、安全门禁和持续集成
+6. 部署测试环境并开展用户验证
 

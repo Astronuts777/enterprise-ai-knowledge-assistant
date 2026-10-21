@@ -28,6 +28,7 @@ __pycache__/
 venv/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Logs and local data
 *.log
@@ -36,4 +37,7 @@ uploads/
 
 # Local workspace tools and temporary artifacts
 work/
+
+# TypeScript build metadata
+*.tsbuildinfo
 

@@ -1,0 +1,19 @@
+[project]
+name = "enterprise-ai-knowledge-assistant"
+version = "0.1.0"
+description = "Trusted enterprise knowledge and decision evidence platform"
+requires-python = ">=3.12,<3.15"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["packages/core/tests", "services/api/tests", "services/worker/tests"]
+pythonpath = ["packages/core/src", "services/api/src", "services/worker/src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["packages/core/src", "services/api/src", "services/worker/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
