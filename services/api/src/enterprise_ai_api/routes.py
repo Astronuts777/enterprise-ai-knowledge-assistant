@@ -76,6 +76,27 @@ def add_member(
     return membership
 
 
+@router.get("/tenants/{tenant_id}/members", response_model=list[MembershipResponse])
+def list_members(
+    tenant_id: UUID,
+    user_id: DevUserId,
+    session: DatabaseSession,
+) -> list[Membership]:
+    authorize_tenant_action(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.MANAGE_MEMBERS,
+    )
+    return list(
+        session.scalars(
+            select(Membership)
+            .where(Membership.tenant_id == tenant_id)
+            .order_by(Membership.created_at, Membership.user_id)
+        )
+    )
+
+
 @router.post(
     "/tenants/{tenant_id}/spaces",
     response_model=SpaceResponse,

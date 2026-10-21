@@ -26,7 +26,18 @@ pnpm install
 pnpm dev:web
 ```
 
-访问 `http://localhost:3000`。
+访问 `http://localhost:3000`。当前 Web 控制台已支持：
+
+- 首次创建企业工作区，并将本地演示用户设为企业管理员。
+- 查看工作区总览和权限基础状态。
+- 创建不同保密等级的知识空间。
+- 添加企业成员并分配企业管理员、知识管理员或普通成员角色。
+- 在前端直接显示 API 权限错误和跨租户拒绝结果。
+
+Web 默认连接 `http://localhost:8000`。需要修改 API 地址时，复制
+`apps/web/.env.example` 为 `apps/web/.env.local` 并修改 `NEXT_PUBLIC_API_URL`。
+本地运行可在 PyCharm 中选择 `Local: Web + API`，或分别启动 `Web: Dev` 和
+`API: FastAPI`。
 
 ### API 与测试
 
@@ -46,6 +57,7 @@ API 健康检查位于 `http://localhost:8000/healthz`。
 POST /v1/tenants
 GET  /v1/tenants/{tenant_id}
 POST /v1/tenants/{tenant_id}/members
+GET  /v1/tenants/{tenant_id}/members
 POST /v1/tenants/{tenant_id}/spaces
 GET  /v1/tenants/{tenant_id}/spaces
 ```

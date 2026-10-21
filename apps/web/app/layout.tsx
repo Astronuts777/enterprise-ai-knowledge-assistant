@@ -4,8 +4,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Enterprise AI Knowledge Assistant",
-  description: "可信、可授权、可追溯的企业知识与决策证据平台",
+  title: "Enterprise AI | 企业知识工作台",
+  description: "可信、可授权、可追溯的企业知识与决策工作台",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

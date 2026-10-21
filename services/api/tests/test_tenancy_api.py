@@ -65,6 +65,45 @@ def test_member_can_read_but_cannot_manage_spaces() -> None:
     assert write_result.json() == {"detail": "Resource not found or access denied"}
 
 
+def test_admin_can_list_members_but_member_cannot() -> None:
+    with client() as test_client:
+        tenant = create_tenant(test_client, ADMIN_A, "Acme")
+        test_client.post(
+            f"/v1/tenants/{tenant['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "member"},
+            headers=headers(ADMIN_A),
+        )
+
+        admin_result = test_client.get(
+            f"/v1/tenants/{tenant['id']}/members", headers=headers(ADMIN_A)
+        )
+        member_result = test_client.get(
+            f"/v1/tenants/{tenant['id']}/members", headers=headers(MEMBER_A)
+        )
+
+    assert admin_result.status_code == 200
+    assert {member["user_id"] for member in admin_result.json()} == {
+        str(ADMIN_A),
+        str(MEMBER_A),
+    }
+    assert member_result.status_code == 403
+
+
+def test_local_frontend_origin_is_allowed_by_cors() -> None:
+    with client() as test_client:
+        response = test_client.options(
+            "/v1/tenants",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-dev-user-id",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
 def test_admin_of_another_tenant_cannot_discover_or_list_spaces() -> None:
     with client() as test_client:
         tenant_a = create_tenant(test_client, ADMIN_A, "Acme")
