@@ -16,6 +16,8 @@ from enterprise_ai_api.crypto import token_hash
 from enterprise_ai_api.database import get_session, set_tenant_context
 from enterprise_ai_api.models import (
     AuthSession,
+    Document,
+    DocumentGrant,
     Membership,
     Space,
     SpaceMembership,
@@ -220,6 +222,7 @@ def accessible_space_ids(
     tenant_id: UUID,
     user_id: UUID,
     manage: bool = False,
+    include_document_grants: bool = True,
 ) -> list[UUID]:
     """Return only spaces explicitly granted to the actor; enterprise admins bypass ACLs."""
 
@@ -235,7 +238,24 @@ def accessible_space_ids(
     )
     if manage:
         statement = statement.where(SpaceMembership.role == "manager")
-    return list(session.scalars(statement))
+    result = set(session.scalars(statement))
+    if include_document_grants and not manage:
+        result.update(
+            session.scalars(
+                select(Document.space_id)
+                .join(
+                    DocumentGrant,
+                    DocumentGrant.document_id == Document.id,
+                )
+                .where(
+                    Document.tenant_id == tenant_id,
+                    Document.access_mode == "restricted",
+                    DocumentGrant.tenant_id == tenant_id,
+                    DocumentGrant.user_id == user_id,
+                )
+            )
+        )
+    return list(result)
 
 
 def authorize_space_access(
@@ -261,6 +281,10 @@ def authorize_space_access(
             detail="Resource not found or access denied",
         )
     if membership.role == Role.ENTERPRISE_ADMIN.value:
+        return space
+    if not manage and space_id in accessible_space_ids(
+        session, tenant_id=tenant_id, user_id=user_id
+    ):
         return space
     grant = session.get(SpaceMembership, (tenant_id, space_id, user_id))
     if grant is None or (manage and grant.role != "manager"):

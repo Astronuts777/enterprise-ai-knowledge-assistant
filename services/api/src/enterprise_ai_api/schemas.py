@@ -23,6 +23,7 @@ class TenantResponse(BaseModel):
     id: UUID
     name: str
     status: str
+    owner_user_id: UUID | None = None
     mfa_policy: MfaPolicy = "off"
     mfa_required_for_current_user: bool = False
     created_at: datetime
@@ -203,6 +204,7 @@ class SpaceMembershipResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
+    access_mode: Literal["space", "restricted"] = "space"
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -232,12 +234,16 @@ class DocumentVersionResponse(BaseModel):
 
 
 class DocumentSummary(BaseModel):
+    can_edit: bool = False
+    can_publish: bool = False
     document: DocumentResponse
     latest_version: DocumentVersionResponse
     published_version: DocumentVersionResponse | None = None
 
 
 class DocumentDetail(BaseModel):
+    can_edit: bool = False
+    can_publish: bool = False
     document: DocumentResponse
     versions: list[DocumentVersionResponse]
 

@@ -362,7 +362,7 @@ def register_account(
 
     tenant: Tenant | None = None
     if payload.organization_name:
-        tenant = Tenant(id=uuid4(), name=payload.organization_name.strip())
+        tenant = Tenant(id=uuid4(), name=payload.organization_name.strip(), owner_user_id=user.id)
         set_tenant_context(session, tenant.id)
         session.add(tenant)
         session.flush()
@@ -1183,6 +1183,10 @@ def accept_invitation(
         if not membership.active:
             raise HTTPException(
                 status_code=409, detail="Suspended membership requires admin restoration"
+            )
+        if session.get(Tenant, tenant_id).owner_user_id == user_id:
+            raise HTTPException(
+                status_code=409, detail="An invitation cannot change enterprise ownership"
             )
         membership.role = invitation.role
     invitation.accepted_at = now

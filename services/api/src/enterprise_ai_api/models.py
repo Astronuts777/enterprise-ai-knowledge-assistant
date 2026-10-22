@@ -12,6 +12,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -35,6 +36,9 @@ class Tenant(Base):
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", name="fk_tenant_owner", use_alter=True)
+    )
     name: Mapped[str] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(32), default="active")
     mfa_policy: Mapped[str] = mapped_column(String(16), default="off")
@@ -172,6 +176,8 @@ class Membership(Base):
     user_id: Mapped[UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
+    display_name: Mapped[str | None] = mapped_column(EncryptedText())
+    department: Mapped[str | None] = mapped_column(EncryptedText())
     role: Mapped[str] = mapped_column(String(32))
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     provisioning_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
@@ -226,6 +232,10 @@ class SpaceMembership(Base):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        CheckConstraint("access_mode IN ('space', 'restricted')", name="ck_document_access_mode"),
+    )
+    access_mode: Mapped[str] = mapped_column(String(16), default="space", server_default="space")
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     tenant_id: Mapped[UUID] = mapped_column(
@@ -235,6 +245,27 @@ class Document(Base):
     title: Mapped[str] = mapped_column(String(255))
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentGrant(Base):
+    __tablename__ = "document_grants"
+    __table_args__ = (
+        CheckConstraint("role IN ('reader', 'editor')", name="ck_document_grant_role"),
+        Index("ix_document_grants_actor", "tenant_id", "user_id", "document_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["memberships.tenant_id", "memberships.user_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(primary_key=True)
+    role: Mapped[str] = mapped_column(String(16))
 
 
 class DocumentVersion(Base):

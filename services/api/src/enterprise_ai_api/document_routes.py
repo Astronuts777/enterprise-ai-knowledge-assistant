@@ -6,7 +6,7 @@ import mimetypes
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -18,6 +18,12 @@ from enterprise_ai_api.ai_providers import AIProviderError, EmbeddingProvider
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import content_fingerprint, encrypt_bytes
 from enterprise_ai_api.database import get_session, set_tenant_context
+from enterprise_ai_api.document_access import (
+    authorize_document,
+    can_access_document,
+    document_access_predicate,
+    is_owner,
+)
 from enterprise_ai_api.document_processing import (
     MAX_UPLOAD_BYTES,
     DocumentProcessingError,
@@ -40,7 +46,6 @@ from enterprise_ai_api.tenancy import (
     CurrentUserId,
     authorize_space_access,
     authorize_tenant_action,
-    can_manage_space,
 )
 from enterprise_ai_core.security import Action
 
@@ -73,20 +78,9 @@ def _document_or_404(
     *,
     manage: bool,
 ) -> Document:
-    document = session.get(Document, document_id)
-    if document is None or document.tenant_id != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resource not found or access denied",
-        )
-    authorize_space_access(
-        session,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        space_id=document.space_id,
-        manage=manage,
+    return authorize_document(
+        session, tenant_id, user_id, document_id, "edit" if manage else "read"
     )
-    return document
 
 
 def _version_or_404(
@@ -186,6 +180,13 @@ def _add_version(
     allow_external_ai: bool,
     scan_status: str,
 ) -> DocumentVersion:
+    # ACL mutations lock this same document; recheck after slow upload/scanning.
+    session.execute(update(Document).where(Document.id == document.id).values(title=Document.title))
+    session.expire_all()
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE
+    )
+    authorize_document(session, tenant_id, user_id, document.id, "edit")
     content_hash = content_fingerprint(content)
     duplicate = session.scalar(
         select(DocumentVersion).where(
@@ -333,6 +334,7 @@ async def upload_document(
     request: Request,
     file: UploadedFile,
     title: DocumentTitle = None,
+    access_mode: Annotated[Literal["space", "restricted"], Form()] = "space",
 ) -> DocumentUploadResponse:
     authorize_tenant_action(
         session,
@@ -347,6 +349,10 @@ async def upload_document(
         space_id=space_id,
         manage=True,
     )
+    if access_mode == "restricted" and not is_owner(session, tenant_id, user_id):
+        raise HTTPException(
+            status_code=403, detail="Only the enterprise owner can restrict documents"
+        )
     filename, extension, content = await _read_upload(file)
     scan_status = await _scan_upload(request, session, tenant_id, user_id, space_id, content)
     document_title = (title or Path(filename).stem).strip()
@@ -360,6 +366,7 @@ async def upload_document(
         tenant_id=tenant_id,
         space_id=space_id,
         title=document_title,
+        access_mode=access_mode,
         created_by=user_id,
     )
     session.add(document)
@@ -409,7 +416,7 @@ async def upload_document_version(
         session,
         tenant_id=tenant_id,
         user_id=user_id,
-        action=Action.MANAGE_DOCUMENTS,
+        action=Action.READ_KNOWLEDGE,
     )
     document = _document_or_404(session, tenant_id, user_id, document_id, manage=True)
     filename, extension, content = await _read_upload(file)
@@ -464,19 +471,19 @@ def list_documents(
         space_id=space_id,
         manage=False,
     )
-    documents = session.scalars(
-        select(Document)
-        .where(Document.tenant_id == tenant_id, Document.space_id == space_id)
+    documents = session.execute(
+        select(Document,
+               document_access_predicate(session, tenant_id, user_id, "edit"),
+               document_access_predicate(session, tenant_id, user_id, "publish"))
+        .where(
+            Document.tenant_id == tenant_id,
+            Document.space_id == space_id,
+            document_access_predicate(session, tenant_id, user_id),
+        )
         .order_by(Document.created_at.desc(), Document.id)
     )
     summaries: list[DocumentSummary] = []
-    can_manage = can_manage_space(
-        session,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        space_id=space_id,
-    )
-    for document in documents:
+    for document, can_manage, can_publish in documents:
         version_statement = select(DocumentVersion).where(
             DocumentVersion.document_id == document.id
         )
@@ -486,13 +493,28 @@ def list_documents(
             version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
         )
         if latest is not None:
-            published = session.scalar(select(DocumentVersion).where(
-                DocumentVersion.document_id == document.id,
-                DocumentVersion.status == "published",
-            ).order_by(DocumentVersion.version_number.desc()).limit(1)) if can_manage else latest
-            summaries.append(DocumentSummary(
-                document=document, latest_version=latest, published_version=published,
-            ))
+            published = (
+                session.scalar(
+                    select(DocumentVersion)
+                    .where(
+                        DocumentVersion.document_id == document.id,
+                        DocumentVersion.status == "published",
+                    )
+                    .order_by(DocumentVersion.version_number.desc())
+                    .limit(1)
+                )
+                if can_manage
+                else latest
+            )
+            summaries.append(
+                DocumentSummary(
+                    document=document,
+                    latest_version=latest,
+                    published_version=published,
+                    can_edit=can_manage,
+                    can_publish=can_publish,
+                )
+            )
     return summaries
 
 
@@ -516,12 +538,7 @@ def read_document_content(
         action=Action.READ_KNOWLEDGE,
     )
     document = _document_or_404(session, tenant_id, user_id, document_id, manage=False)
-    can_manage = can_manage_space(
-        session,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        space_id=document.space_id,
-    )
+    can_manage = can_access_document(session, tenant_id, user_id, document.id, "edit")
     version_statement = select(DocumentVersion).where(DocumentVersion.document_id == document.id)
     if version_id is not None:
         version_statement = version_statement.where(DocumentVersion.id == version_id)
@@ -579,12 +596,7 @@ def get_document(
         action=Action.READ_KNOWLEDGE,
     )
     document = _document_or_404(session, tenant_id, user_id, document_id, manage=False)
-    can_manage = can_manage_space(
-        session,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        space_id=document.space_id,
-    )
+    can_manage = can_access_document(session, tenant_id, user_id, document.id, "edit")
     version_statement = select(DocumentVersion).where(DocumentVersion.document_id == document.id)
     if not can_manage:
         version_statement = version_statement.where(DocumentVersion.status == "published")
@@ -593,7 +605,12 @@ def get_document(
     )
     if not versions and not can_manage:
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
-    return DocumentDetail(document=document, versions=versions)
+    return DocumentDetail(
+        document=document,
+        versions=versions,
+        can_edit=can_manage,
+        can_publish=can_access_document(session, tenant_id, user_id, document.id, "publish"),
+    )
 
 
 @router.get(
@@ -610,7 +627,7 @@ def preview_document_chunks(
         session,
         tenant_id=tenant_id,
         user_id=user_id,
-        action=Action.MANAGE_DOCUMENTS,
+        action=Action.READ_KNOWLEDGE,
     )
     _version_or_404(session, tenant_id, user_id, version_id, manage=True)
     return list(
@@ -623,7 +640,10 @@ def preview_document_chunks(
 
 
 def _lock_publication_version(
-    session: Session, tenant_id: UUID, user_id: UUID, version_id: UUID,
+    session: Session,
+    tenant_id: UUID,
+    user_id: UUID,
+    version_id: UUID,
 ) -> DocumentVersion:
     authorize_tenant_action(
         session,
@@ -633,14 +653,24 @@ def _lock_publication_version(
     )
     version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
     # Serialize publication changes for the whole document on PostgreSQL and SQLite.
-    session.execute(update(Document).where(
-        Document.id == version.document_id, Document.tenant_id == tenant_id,
-    ).values(title=Document.title))
+    session.execute(
+        update(Document)
+        .where(
+            Document.id == version.document_id,
+            Document.tenant_id == tenant_id,
+        )
+        .values(title=Document.title)
+    )
     session.expire_all()
     authorize_tenant_action(
-        session, tenant_id=tenant_id, user_id=user_id, action=Action.MANAGE_DOCUMENTS,
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.MANAGE_DOCUMENTS,
     )
-    return _version_or_404(session, tenant_id, user_id, version_id, manage=True)
+    version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
+    authorize_document(session, tenant_id, user_id, version.document_id, "publish")
+    return version
 
 
 @router.post(
@@ -648,7 +678,10 @@ def _lock_publication_version(
     response_model=DocumentVersionResponse,
 )
 def unpublish_document_version(
-    tenant_id: UUID, version_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
+    tenant_id: UUID,
+    version_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> DocumentVersion:
     version = _lock_publication_version(session, tenant_id, user_id, version_id)
     if version.status != "published":
@@ -656,8 +689,12 @@ def unpublish_document_version(
     version.status = "ready"
     version.published_at = None
     record_audit_event(
-        session, tenant_id=tenant_id, actor_id=user_id,
-        action="document.unpublished", resource_type="document_version", resource_id=version.id,
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="document.unpublished",
+        resource_type="document_version",
+        resource_id=version.id,
         details={"document_id": str(version.document_id), "version_number": version.version_number},
     )
     session.commit()
@@ -671,7 +708,10 @@ def unpublish_document_version(
     response_model=DocumentVersionResponse,
 )
 def publish_document_version(
-    tenant_id: UUID, version_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
+    tenant_id: UUID,
+    version_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> DocumentVersion:
     version = _lock_publication_version(session, tenant_id, user_id, version_id)
     if version.status not in {"ready", "published", "superseded"} or not session.scalar(
@@ -732,6 +772,7 @@ def rebuild_document_semantic_index(
         action=Action.MANAGE_DOCUMENTS,
     )
     version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
+    authorize_document(session, tenant_id, user_id, version.document_id, "publish")
     if not embedding_provider.enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

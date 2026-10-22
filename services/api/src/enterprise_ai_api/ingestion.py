@@ -11,6 +11,7 @@ from enterprise_ai_api.ai_providers import AIProviderError
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import content_fingerprint, decrypt_bytes
 from enterprise_ai_api.database import set_tenant_context
+from enterprise_ai_api.document_access import authorize_document
 from enterprise_ai_api.document_processing import (
     DocumentProcessingError,
     parse_document,
@@ -26,7 +27,7 @@ from enterprise_ai_api.models import (
     User,
 )
 from enterprise_ai_api.object_storage import ObjectStorageError
-from enterprise_ai_api.tenancy import authorize_space_access, authorize_tenant_action
+from enterprise_ai_api.tenancy import authorize_tenant_action
 from enterprise_ai_core.security import Action
 
 MAX_ATTEMPTS = 3
@@ -218,12 +219,6 @@ def _authorize(session, version, document):
         session,
         tenant_id=version.tenant_id,
         user_id=version.created_by,
-        action=Action.MANAGE_DOCUMENTS,
+        action=Action.READ_KNOWLEDGE,
     )
-    authorize_space_access(
-        session,
-        tenant_id=version.tenant_id,
-        user_id=version.created_by,
-        space_id=document.space_id,
-        manage=True,
-    )
+    authorize_document(session, version.tenant_id, version.created_by, document.id, "edit")

@@ -411,3 +411,23 @@ def test_expired_state_cannot_be_exchanged(federation):
         )
         session.commit()
     assert client.get(callback, follow_redirects=False).status_code == 400
+
+
+def test_scim_cannot_disable_an_enterprise_owner(federation):
+    from enterprise_ai_api.models import Tenant
+
+    app, client, provider, _, _ = federation
+    resource = provision(client).json()
+    with app.state.session_factory() as session:
+        identity = session.get(FederatedIdentity, UUID(resource["id"]))
+        # Simulate a separately verified owner assignment in this isolated fixture only.
+        session.get(Tenant, provider.tenant_id).owner_user_id = identity.user_id
+        session.get(Membership, (provider.tenant_id, identity.user_id)).role = "enterprise_admin"
+        session.commit()
+    path = f"/scim/v2/company/Users/{resource['id']}"
+    assert client.delete(path, headers=auth()).status_code == 409
+    assert client.patch(path, headers=auth(), json={
+        "schemas": [SCIM_PATCH],
+        "Operations": [{"op": "replace", "path": "active", "value": False}],
+    }).status_code == 409
+    assert client.get(path, headers=auth()).json()["active"] is True

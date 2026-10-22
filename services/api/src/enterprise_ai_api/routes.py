@@ -43,9 +43,10 @@ def create_tenant(
     user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> Tenant:
-    tenant = Tenant(id=uuid4(), name=payload.name)
+    tenant = Tenant(id=uuid4(), name=payload.name, owner_user_id=user_id)
     set_tenant_context(session, tenant.id)
     user = ensure_development_user(session, user_id)
+    session.flush()
     session.add(tenant)
     # The membership references both parent rows. Flush them first so PostgreSQL
     # never attempts the membership INSERT before its tenant and user exist.
@@ -156,6 +157,9 @@ def add_member(
         user_id=user_id,
         action=Action.MANAGE_MEMBERS,
     )
+    tenant = session.get(Tenant, tenant_id)
+    if tenant.owner_user_id == payload.user_id and payload.role != "enterprise_admin":
+        raise HTTPException(status_code=409, detail="Enterprise owner cannot be demoted")
     ensure_development_user(session, payload.user_id)
     membership = session.get(Membership, (tenant_id, payload.user_id))
     if membership is None:
@@ -182,31 +186,42 @@ def add_member(
     return membership
 
 
-@router.patch("/tenants/{tenant_id}/members/{target_user_id}/status",
-              response_model=MembershipResponse)
+@router.patch(
+    "/tenants/{tenant_id}/members/{target_user_id}/status", response_model=MembershipResponse
+)
 def update_member_status(
-    tenant_id: UUID, target_user_id: UUID, payload: MembershipStatusUpdate,
-    user_id: CurrentUserId, session: DatabaseSession,
+    tenant_id: UUID,
+    target_user_id: UUID,
+    payload: MembershipStatusUpdate,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
 ) -> Membership:
-    authorize_tenant_action(session, tenant_id=tenant_id, user_id=user_id,
-                           action=Action.MANAGE_MEMBERS)
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.MANAGE_MEMBERS
+    )
     if target_user_id == user_id and not payload.active:
         raise HTTPException(status_code=409, detail="Administrators cannot suspend themselves")
     # Serialize changes for a tenant on PostgreSQL and SQLite. Recheck the actor after
     # the lock: two admins must not concurrently suspend one another using stale access.
     session.execute(update(Tenant).where(Tenant.id == tenant_id).values(status=Tenant.status))
     session.expire_all()
-    authorize_tenant_action(session, tenant_id=tenant_id, user_id=user_id,
-                           action=Action.MANAGE_MEMBERS)
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.MANAGE_MEMBERS
+    )
+    if session.get(Tenant, tenant_id).owner_user_id == target_user_id and not payload.active:
+        raise HTTPException(status_code=409, detail="Enterprise owner cannot be suspended")
     membership = session.get(Membership, (tenant_id, target_user_id))
     if membership is None:
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
     if membership.active != payload.active:
         membership.active = payload.active
         record_audit_event(
-            session, tenant_id=tenant_id, actor_id=user_id,
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
             action="membership.restored" if payload.active else "membership.suspended",
-            resource_type="membership", resource_id=target_user_id,
+            resource_type="membership",
+            resource_id=target_user_id,
             details={"active": payload.active},
         )
     session.commit()
@@ -298,9 +313,7 @@ def list_spaces(tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSessio
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    allowed_ids = accessible_space_ids(
-        session, tenant_id=tenant_id, user_id=user_id
-    )
+    allowed_ids = accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
     if not allowed_ids:
         return []
     return list(

@@ -15,6 +15,7 @@ from enterprise_ai_api.ai_providers import (
 )
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.database import get_session, set_tenant_context
+from enterprise_ai_api.document_access import document_access_predicate
 from enterprise_ai_api.models import (
     AnswerCitation,
     Document,
@@ -58,18 +59,35 @@ Embedding = Annotated[EmbeddingProvider, Depends(get_embedding_provider)]
 
 @router.get("/tenants/{tenant_id}/knowledge-status", response_model=KnowledgeStatusResponse)
 def knowledge_status(
-    tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
-    request: Request, answer_provider: AnswerProvider, embedding_provider: Embedding,
+    tenant_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+    request: Request,
+    answer_provider: AnswerProvider,
+    embedding_provider: Embedding,
     space_id: UUID | None = None,
 ) -> dict[str, object]:
     authorize_tenant_action(
-        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.READ_KNOWLEDGE,
     )
     allowed = accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
     scoped = [value for value in allowed if space_id is None or value == space_id]
-    restricted = bool(session.scalar(select(Space.id).where(
-        Space.id.in_(scoped), Space.classification == "restricted",
-    ).limit(1))) and not request.app.state.external_ai_allowed_for_restricted
+    restricted = (
+        bool(
+            session.scalar(
+                select(Space.id)
+                .where(
+                    Space.id.in_(scoped),
+                    Space.classification == "restricted",
+                )
+                .limit(1)
+            )
+        )
+        and not request.app.state.external_ai_allowed_for_restricted
+    )
     embedding_enabled = embedding_provider.enabled and not (
         restricted and embedding_provider.external
     )
@@ -77,22 +95,35 @@ def knowledge_status(
         restricted and answer_provider.external
     )
     total, indexed = session.execute(
-        select(func.count(DocumentChunk.id), func.sum(case((
-            (DocumentChunk.embedding.is_not(None))
-            & (DocumentChunk.embedding_model == embedding_provider.model_name), 1,
-        ), else_=0)))
+        select(
+            func.count(DocumentChunk.id),
+            func.sum(
+                case(
+                    (
+                        (DocumentChunk.embedding.is_not(None))
+                        & (DocumentChunk.embedding_model == embedding_provider.model_name),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+        )
         .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
         .join(Document, Document.id == DocumentVersion.document_id)
-        .where(Document.tenant_id == tenant_id, Document.space_id.in_(scoped),
-               DocumentVersion.status == "published", DocumentVersion.tenant_id == tenant_id,
-               DocumentChunk.tenant_id == tenant_id)
+        .where(
+            Document.tenant_id == tenant_id,
+            Document.space_id.in_(scoped),
+            DocumentVersion.status == "published",
+            DocumentVersion.tenant_id == tenant_id,
+            DocumentChunk.tenant_id == tenant_id,
+            document_access_predicate(session, tenant_id, user_id),
+        )
     ).one()
     return {
         "semantic_enabled": embedding_enabled,
         "generation_enabled": generation_enabled,
-        "restricted_by_policy": restricted and (
-            embedding_provider.external or answer_provider.external
-        ),
+        "restricted_by_policy": restricted
+        and (embedding_provider.external or answer_provider.external),
         "published_chunks": total,
         "indexed_chunks": (indexed or 0) if embedding_enabled else 0,
         "embedding_model": embedding_provider.model_name if embedding_enabled else None,
@@ -122,15 +153,24 @@ def _response(session: Session, answer: KnowledgeAnswer) -> KnowledgeAnswerRespo
     )
 
 
-def _sources_visible(session: Session, answer_id: UUID, allowed_spaces: set[UUID]) -> bool:
+def _sources_visible(
+    session: Session, answer_id: UUID, allowed_spaces: set[UUID], tenant_id: UUID, user_id: UUID
+) -> bool:
     sources = session.execute(
-        select(Document.space_id, DocumentVersion.status)
+        select(
+            Document.space_id,
+            DocumentVersion.status,
+            document_access_predicate(session, tenant_id, user_id),
+        )
         .select_from(AnswerCitation)
         .outerjoin(Document, AnswerCitation.document_id == Document.id)
         .outerjoin(DocumentVersion, AnswerCitation.document_version_id == DocumentVersion.id)
         .where(AnswerCitation.answer_id == answer_id)
     ).all()
-    return all(space in allowed_spaces and state == "published" for space, state in sources)
+    return all(
+        space in allowed_spaces and state == "published" and visible
+        for space, state, visible in sources
+    )
 
 
 @router.get(
@@ -138,50 +178,88 @@ def _sources_visible(session: Session, answer_id: UUID, allowed_spaces: set[UUID
     response_model=CitationSourceResponse,
 )
 def read_citation_source(
-    tenant_id: UUID, answer_id: UUID, citation_number: Annotated[int, Path(ge=1)],
-    user_id: CurrentUserId, session: DatabaseSession, response: Response,
+    tenant_id: UUID,
+    answer_id: UUID,
+    citation_number: Annotated[int, Path(ge=1)],
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+    response: Response,
 ) -> CitationSourceResponse:
     """Resolve an owned answer's immutable source IDs, never the latest draft."""
     authorize_tenant_action(
-        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.READ_KNOWLEDGE,
     )
     answer = session.get(KnowledgeAnswer, answer_id)
     if answer is None or answer.tenant_id != tenant_id or answer.created_by != user_id:
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
     allowed = set(accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id))
-    if not _sources_visible(session, answer_id, allowed):
+    if not _sources_visible(session, answer_id, allowed, tenant_id, user_id):
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
-    citation = session.scalar(select(AnswerCitation).where(
-        AnswerCitation.answer_id == answer_id, AnswerCitation.tenant_id == tenant_id,
-        AnswerCitation.citation_number == citation_number,
-    ))
+    citation = session.scalar(
+        select(AnswerCitation).where(
+            AnswerCitation.answer_id == answer_id,
+            AnswerCitation.tenant_id == tenant_id,
+            AnswerCitation.citation_number == citation_number,
+        )
+    )
     if citation is None:
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
     document = session.get(Document, citation.document_id)
     version = session.get(DocumentVersion, citation.document_version_id)
     chunk = session.get(DocumentChunk, citation.document_chunk_id)
     if (
-        document is None or version is None or chunk is None
-        or document.tenant_id != tenant_id or version.tenant_id != tenant_id
-        or chunk.tenant_id != tenant_id or version.document_id != document.id
-        or chunk.document_version_id != version.id or version.status != "published"
+        document is None
+        or version is None
+        or chunk is None
+        or document.tenant_id != tenant_id
+        or version.tenant_id != tenant_id
+        or chunk.tenant_id != tenant_id
+        or version.document_id != document.id
+        or chunk.document_version_id != version.id
+        or version.status != "published"
     ):
         raise HTTPException(status_code=404, detail="Resource not found or access denied")
     authorize_space_access(
-        session, tenant_id=tenant_id, user_id=user_id, space_id=document.space_id, manage=False,
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        space_id=document.space_id,
+        manage=False,
     )
-    chunks = list(session.scalars(select(DocumentChunk).where(
-        DocumentChunk.tenant_id == tenant_id, DocumentChunk.document_version_id == version.id,
-    ).order_by(DocumentChunk.position)))
+    chunks = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.tenant_id == tenant_id,
+                DocumentChunk.document_version_id == version.id,
+            )
+            .order_by(DocumentChunk.position)
+        )
+    )
     result = CitationSourceResponse(
-        document=document, version=version, chunks=chunks, answer_id=answer_id,
-        citation_number=citation_number, cited_chunk_id=chunk.id,
+        document=document,
+        version=version,
+        chunks=chunks,
+        answer_id=answer_id,
+        citation_number=citation_number,
+        cited_chunk_id=chunk.id,
     )
     record_audit_event(
-        session, tenant_id=tenant_id, actor_id=user_id, action="knowledge.citation_viewed",
-        resource_type="knowledge_answer", resource_id=answer_id,
-        details={"citation_number": citation_number, "document_id": str(document.id),
-                 "version_number": version.version_number, "chunk_id": str(chunk.id)},
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="knowledge.citation_viewed",
+        resource_type="knowledge_answer",
+        resource_id=answer_id,
+        details={
+            "citation_number": citation_number,
+            "document_id": str(document.id),
+            "version_number": version.version_number,
+            "chunk_id": str(chunk.id),
+        },
     )
     session.commit()
     response.headers["Cache-Control"] = "no-store"
@@ -208,9 +286,7 @@ def ask_knowledge_question(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    allowed_space_ids = set(
-        accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
-    )
+    allowed_space_ids = set(accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id))
     requested_space_ids = list(dict.fromkeys(payload.space_ids or []))
     scoped_space_ids = (
         [space_id for space_id in requested_space_ids if space_id in allowed_space_ids]
@@ -222,8 +298,7 @@ def ask_knowledge_question(
         session.scalars(select(Space.classification).where(Space.id.in_(scoped_space_ids)))
     )
     external_ai_allowed = (
-        "restricted" not in classifications
-        or request.app.state.external_ai_allowed_for_restricted
+        "restricted" not in classifications or request.app.state.external_ai_allowed_for_restricted
     )
     query_embedding: list[float] | None = None
     retrieval_mode = "lexical"
@@ -249,6 +324,7 @@ def ask_knowledge_question(
             session,
             tenant_id=tenant_id,
             question=payload.question,
+            user_id=user_id,
             space_ids=scoped_space_ids,
             query_embedding=query_embedding,
             embedding_model=(
@@ -284,16 +360,27 @@ def ask_knowledge_question(
     # is running; do not send a newly generated answer based on stale permission.
     session.expire_all()
     authorize_tenant_action(
-        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.READ_KNOWLEDGE,
     )
     current_spaces = accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
-    source_versions = {item.version.id for item in draft.evidence}
-    valid_versions = set(session.scalars(
-        select(DocumentVersion.id).join(Document, Document.id == DocumentVersion.document_id)
-        .where(DocumentVersion.id.in_(source_versions), DocumentVersion.status == "published",
-               DocumentVersion.tenant_id == tenant_id, Document.tenant_id == tenant_id,
-               Document.space_id.in_(current_spaces))
-    ))
+    source_versions = {item.version.id for item in evidence}
+    valid_versions = set(
+        session.scalars(
+            select(DocumentVersion.id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(
+                DocumentVersion.id.in_(source_versions),
+                DocumentVersion.status == "published",
+                DocumentVersion.tenant_id == tenant_id,
+                Document.tenant_id == tenant_id,
+                Document.space_id.in_(current_spaces),
+                document_access_predicate(session, tenant_id, user_id),
+            )
+        )
+    )
     if source_versions != valid_versions:
         raise HTTPException(status_code=409, detail="知识来源或访问权限已变化，请重新提问。")
     answer = KnowledgeAnswer(
@@ -374,13 +461,11 @@ def list_question_history(
             .limit(limit)
         )
     )
-    allowed_space_ids = set(
-        accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
-    )
+    allowed_space_ids = set(accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id))
     visible_answers: list[KnowledgeAnswerResponse] = []
     for answer in answers:
         # Recheck every source, including publication state. Hiding just a citation
         # would still leak its excerpt through the saved answer text.
-        if _sources_visible(session, answer.id, allowed_space_ids):
+        if _sources_visible(session, answer.id, allowed_space_ids, tenant_id, user_id):
             visible_answers.append(_response(session, answer))
     return visible_answers

@@ -52,6 +52,7 @@ def test_account_registration_login_and_server_side_logout() -> None:
     assert me.status_code == 200
     assert me.json()["email"] == "owner@example.com"
     assert tenant.status_code == 200
+    assert tenant.json()["owner_user_id"] == account["user_id"]
     assert logged_out.status_code == 204
     assert rejected.status_code == 401
     assert logged_in.status_code == 200
@@ -624,3 +625,26 @@ def test_migration_encrypts_existing_knowledge_rows(tmp_path: Path, monkeypatch)
     assert encrypted_file.startswith(FILE_MAGIC)
     assert decrypt_bytes(encrypted_file, context=context) == b"Legacy file secret"
     assert not legacy_file.exists()
+
+
+def test_invitation_cannot_overwrite_enterprise_owner():
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from enterprise_ai_api.models import User
+
+    app = create_app("sqlite://", account_auth=True)
+    with TestClient(app) as client:
+        account = register(client, "isolated-owner@example.test", organization_name="Owner test")
+        with app.state.session_factory() as session:
+            session.get(User, UUID(account["user_id"])).email_verified_at = datetime.now(UTC)
+            session.commit()
+        tenant = account["tenant_id"]
+        invitation = client.post(f"/v1/tenants/{tenant}/invitations", json={
+            "email": "isolated-owner@example.test", "role": "member",
+        })
+        assert invitation.status_code == 201
+        accepted = client.post(f"/v1/auth/invitations/{tenant}/accept",
+                               json={"token": invitation.json()["invite_token"]})
+        assert accepted.status_code == 409
+        assert client.get(f"/v1/tenants/{tenant}/members").json()[0]["role"] == "enterprise_admin"

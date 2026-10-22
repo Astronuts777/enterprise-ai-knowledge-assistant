@@ -691,3 +691,13 @@ button { cursor: pointer; }
   .question-row, .answer-row { grid-template-columns: 1.8rem 1fr; padding: 1rem; }
   .question-row > span, .answer-row > span { height: 1.8rem; width: 1.8rem; }
 }
+
+/* Tenant-local employee directory and document access controls. */
+.employee-grid { display: grid; grid-template-columns: minmax(230px, .85fr) minmax(300px, 1.4fr); gap: 24px; margin: 24px 0; }
+.employee-list, .employee-detail { background: #fff; border: 1px solid var(--line, #dce4df); border-radius: 18px; padding: 20px; min-width: 0; }
+.employee-item { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 16px; margin-bottom: 10px; text-align: left; border: 1px solid #dce4df; border-radius: 12px; background: #f8faf7; color: inherit; cursor: pointer; }
+.employee-item.selected { border-color: #3f6e51; background: #eaf2e5; }
+.employee-item small, .employee-detail .upload-hint { overflow-wrap: anywhere; }
+.employee-item span, .employee-item small { color: #65756d; }
+.document-grant-panel { border-top: 1px solid #dce4df; margin-top: 24px; padding-top: 20px; }
+@media (max-width: 800px) { .employee-grid { grid-template-columns: 1fr; } }

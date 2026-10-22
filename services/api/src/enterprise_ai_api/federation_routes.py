@@ -458,6 +458,8 @@ async def scim_user(key: str, identity_id: UUID, request: Request, session: Data
     )
     membership = session.get(Membership, (provider.tenant_id, identity.user_id))
     user = session.get(User, identity.user_id)
+    if session.get(Tenant, provider.tenant_id).owner_user_id == identity.user_id:
+        return _scim_error(409, "Enterprise owner cannot be changed through SCIM")
     if request.method == "DELETE":
         identity.deleted = True
         membership.provisioning_active = False

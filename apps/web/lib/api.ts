@@ -1,4 +1,5 @@
 export type Tenant = {
+  owner_user_id: string | null;
   id: string;
   name: string;
   status: string;
@@ -55,6 +56,7 @@ export type AuditEvent = {
 export type DocumentStatus = "queued" | "processing" | "ready" | "published" | "superseded" | "failed";
 
 export type KnowledgeDocument = {
+  access_mode: "space" | "restricted";
   id: string;
   tenant_id: string;
   space_id: string;
@@ -80,12 +82,16 @@ export type DocumentVersion = {
 };
 
 export type DocumentSummary = {
+  can_edit: boolean;
+  can_publish: boolean;
   document: KnowledgeDocument;
   latest_version: DocumentVersion;
   published_version: DocumentVersion | null;
 };
 
 export type DocumentDetail = {
+  can_edit: boolean;
+  can_publish: boolean;
   document: KnowledgeDocument;
   versions: DocumentVersion[];
 };
@@ -580,10 +586,11 @@ export async function uploadDocument(
   actorId: string,
   tenantId: string,
   spaceId: string,
-  input: { title: string; file: File },
+  input: { title: string; file: File; access_mode?: "space" | "restricted" },
 ): Promise<DocumentUpload> {
   const form = new FormData();
   form.set("title", input.title);
+  form.set("access_mode", input.access_mode ?? "space");
   form.set("file", input.file);
   const response = await fetch(
     `${API_BASE_URL}/v1/tenants/${tenantId}/spaces/${spaceId}/documents`,
@@ -647,4 +654,35 @@ export function listQuestionHistory(
   tenantId: string,
 ): Promise<KnowledgeAnswer[]> {
   return request<KnowledgeAnswer[]>(`/v1/tenants/${tenantId}/questions`, actorId);
+}
+
+export type Employee = {
+  user_id: string; display_name: string; department: string;
+  role: MembershipRole; active: boolean; is_owner: boolean;
+};
+export type DocumentAccess = {
+  access_mode: "space" | "restricted";
+  grants: { user_id: string; role: "reader" | "editor" }[];
+};
+export function listEmployees(actor: string, tenant: string, offset = 0) {
+  return request<Employee[]>(`/v1/tenants/${tenant}/employees?offset=${offset}&limit=100`, actor);
+}
+export function saveEmployee(actor: string, tenant: string, target: string, display_name: string, department: string) {
+  return request<Employee>(`/v1/tenants/${tenant}/employees/${target}`, actor, {
+    method: "PATCH", body: JSON.stringify({ display_name, department }),
+  });
+}
+export function getDocumentAccess(actor: string, tenant: string, document: string) {
+  return request<DocumentAccess>(`/v1/tenants/${tenant}/documents/${document}/access`, actor);
+}
+export function setDocumentAccess(actor: string, tenant: string, document: string, access_mode: "space" | "restricted") {
+  return request(`/v1/tenants/${tenant}/documents/${document}/access`, actor, {
+    method: "PUT", body: JSON.stringify({ access_mode }),
+  });
+}
+export function setDocumentGrant(actor: string, tenant: string, document: string, target: string, role: "reader" | "editor" | "none") {
+  return request(`/v1/tenants/${tenant}/documents/${document}/grants/${target}`, actor, {
+    method: role === "none" ? "DELETE" : "PUT",
+    ...(role !== "none" ? { body: JSON.stringify({ role }) } : {}),
+  });
 }

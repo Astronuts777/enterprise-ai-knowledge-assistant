@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.auth_routes import DatabaseSession
 from enterprise_ai_api.document_routes import _version_or_404
-from enterprise_ai_api.models import IngestionJob
+from enterprise_ai_api.models import Document, IngestionJob
 from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
 from enterprise_ai_core.security import Action
 
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/v1")
 
 def _job(session, tenant_id, user_id, version_id):
     authorize_tenant_action(
-        session, tenant_id=tenant_id, user_id=user_id, action=Action.MANAGE_DOCUMENTS
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE
     )
     version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
     job = session.scalar(
@@ -51,6 +51,11 @@ def change_job(
     user_id: CurrentUserId,
     session: DatabaseSession,
 ):
+    version, job = _job(session, tenant_id, user_id, version_id)
+    session.execute(update(Document).where(
+        Document.id == version.document_id, Document.tenant_id == tenant_id,
+    ).values(title=Document.title))
+    session.expire_all()
     version, job = _job(session, tenant_id, user_id, version_id)
     if operation not in {"retry", "cancel"}:
         raise HTTPException(404, "Unknown operation")
