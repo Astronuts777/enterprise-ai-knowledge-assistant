@@ -212,6 +212,22 @@ def ask_knowledge_question(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="The configured AI model is temporarily unavailable",
         ) from error
+    # Generation may take a long time. A source can be withdrawn while the model
+    # is running; do not send a newly generated answer based on stale permission.
+    session.expire_all()
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+    )
+    current_spaces = accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
+    source_versions = {item.version.id for item in draft.evidence}
+    valid_versions = set(session.scalars(
+        select(DocumentVersion.id).join(Document, Document.id == DocumentVersion.document_id)
+        .where(DocumentVersion.id.in_(source_versions), DocumentVersion.status == "published",
+               DocumentVersion.tenant_id == tenant_id, Document.tenant_id == tenant_id,
+               Document.space_id.in_(current_spaces))
+    ))
+    if source_versions != valid_versions:
+        raise HTTPException(status_code=409, detail="知识来源或访问权限已变化，请重新提问。")
     answer = KnowledgeAnswer(
         tenant_id=tenant_id,
         created_by=user_id,
@@ -295,13 +311,15 @@ def list_question_history(
     )
     visible_answers: list[KnowledgeAnswerResponse] = []
     for answer in answers:
-        cited_space_ids = set(
-            session.scalars(
-                select(Document.space_id)
-                .join(AnswerCitation, AnswerCitation.document_id == Document.id)
-                .where(AnswerCitation.answer_id == answer.id)
-            )
-        )
-        if cited_space_ids.issubset(allowed_space_ids):
+        # Recheck every source, including publication state. Hiding just a citation
+        # would still leak its excerpt through the saved answer text.
+        sources = session.execute(
+            select(Document.space_id, DocumentVersion.status)
+            .select_from(AnswerCitation)
+            .outerjoin(Document, AnswerCitation.document_id == Document.id)
+            .outerjoin(DocumentVersion, AnswerCitation.document_version_id == DocumentVersion.id)
+            .where(AnswerCitation.answer_id == answer.id)
+        ).all()
+        if all(space in allowed_space_ids and state == "published" for space, state in sources):
             visible_answers.append(_response(session, answer))
     return visible_answers

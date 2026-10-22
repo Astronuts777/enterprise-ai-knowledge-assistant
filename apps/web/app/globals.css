@@ -436,6 +436,12 @@ button { cursor: pointer; }
 .document-status { border-radius: 2rem; justify-self: start; padding: 0.3rem 0.55rem; }
 .document-status.ready { background: #fff4d8; color: #8b6818; }
 .document-status.published { background: #e8f3df; color: #4e743e; }
+.version-list { display: grid; gap: 16px; margin: 24px 0; }
+.publication-confirm { margin-top: 20px; padding: 16px; border: 1px solid #d5b99a; border-radius: 12px; background: #fcf6ee; }
+.version-entry { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid #dce5df; border-radius: 12px; }
+.version-entry > div:first-child { min-width: 0; flex: 1 1 220px; overflow-wrap: anywhere; }
+.version-entry small { display: block; margin: 8px 0; color: #64766d; }
+.version-entry .document-actions { flex-wrap: wrap; }
 .document-status.superseded { background: #edf0ef; color: #6f7e78; }
 .document-status.failed { background: #f8e7e4; color: #9b5247; }
 .document-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }

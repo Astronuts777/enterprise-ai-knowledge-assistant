@@ -234,6 +234,7 @@ class DocumentVersionResponse(BaseModel):
 class DocumentSummary(BaseModel):
     document: DocumentResponse
     latest_version: DocumentVersionResponse
+    published_version: DocumentVersionResponse | None = None
 
 
 class DocumentDetail(BaseModel):

@@ -10,7 +10,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -486,7 +486,13 @@ def list_documents(
             version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
         )
         if latest is not None:
-            summaries.append(DocumentSummary(document=document, latest_version=latest))
+            published = session.scalar(select(DocumentVersion).where(
+                DocumentVersion.document_id == document.id,
+                DocumentVersion.status == "published",
+            ).order_by(DocumentVersion.version_number.desc()).limit(1)) if can_manage else latest
+            summaries.append(DocumentSummary(
+                document=document, latest_version=latest, published_version=published,
+            ))
     return summaries
 
 
@@ -499,6 +505,7 @@ def read_document_content(
     document_id: UUID,
     user_id: CurrentUserId,
     session: DatabaseSession,
+    version_id: UUID | None = None,
 ) -> DocumentContentResponse:
     """Return parsed content only after tenant, space, and publication checks."""
 
@@ -516,6 +523,8 @@ def read_document_content(
         space_id=document.space_id,
     )
     version_statement = select(DocumentVersion).where(DocumentVersion.document_id == document.id)
+    if version_id is not None:
+        version_statement = version_statement.where(DocumentVersion.id == version_id)
     if not can_manage:
         version_statement = version_statement.where(DocumentVersion.status == "published")
     version = session.scalar(
@@ -582,6 +591,8 @@ def get_document(
     versions = list(
         session.scalars(version_statement.order_by(DocumentVersion.version_number.desc()))
     )
+    if not versions and not can_manage:
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
     return DocumentDetail(document=document, versions=versions)
 
 
@@ -611,15 +622,8 @@ def preview_document_chunks(
     )
 
 
-@router.post(
-    "/tenants/{tenant_id}/document-versions/{version_id}/publish",
-    response_model=DocumentVersionResponse,
-)
-def publish_document_version(
-    tenant_id: UUID,
-    version_id: UUID,
-    user_id: CurrentUserId,
-    session: DatabaseSession,
+def _lock_publication_version(
+    session: Session, tenant_id: UUID, user_id: UUID, version_id: UUID,
 ) -> DocumentVersion:
     authorize_tenant_action(
         session,
@@ -628,7 +632,51 @@ def publish_document_version(
         action=Action.MANAGE_DOCUMENTS,
     )
     version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
-    if version.status in {"failed", "queued", "processing"}:
+    # Serialize publication changes for the whole document on PostgreSQL and SQLite.
+    session.execute(update(Document).where(
+        Document.id == version.document_id, Document.tenant_id == tenant_id,
+    ).values(title=Document.title))
+    session.expire_all()
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.MANAGE_DOCUMENTS,
+    )
+    return _version_or_404(session, tenant_id, user_id, version_id, manage=True)
+
+
+@router.post(
+    "/tenants/{tenant_id}/document-versions/{version_id}/unpublish",
+    response_model=DocumentVersionResponse,
+)
+def unpublish_document_version(
+    tenant_id: UUID, version_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
+) -> DocumentVersion:
+    version = _lock_publication_version(session, tenant_id, user_id, version_id)
+    if version.status != "published":
+        raise HTTPException(status_code=409, detail="Only published versions can be withdrawn")
+    version.status = "ready"
+    version.published_at = None
+    record_audit_event(
+        session, tenant_id=tenant_id, actor_id=user_id,
+        action="document.unpublished", resource_type="document_version", resource_id=version.id,
+        details={"document_id": str(version.document_id), "version_number": version.version_number},
+    )
+    session.commit()
+    set_tenant_context(session, tenant_id)
+    session.refresh(version)
+    return version
+
+
+@router.post(
+    "/tenants/{tenant_id}/document-versions/{version_id}/publish",
+    response_model=DocumentVersionResponse,
+)
+def publish_document_version(
+    tenant_id: UUID, version_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
+) -> DocumentVersion:
+    version = _lock_publication_version(session, tenant_id, user_id, version_id)
+    if version.status not in {"ready", "published", "superseded"} or not session.scalar(
+        select(DocumentChunk.id).where(DocumentChunk.document_version_id == version.id).limit(1)
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only successfully processed document versions can be published",

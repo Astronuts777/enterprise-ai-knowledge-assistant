@@ -82,6 +82,12 @@ export type DocumentVersion = {
 export type DocumentSummary = {
   document: KnowledgeDocument;
   latest_version: DocumentVersion;
+  published_version: DocumentVersion | null;
+};
+
+export type DocumentDetail = {
+  document: KnowledgeDocument;
+  versions: DocumentVersion[];
 };
 
 export type DocumentUpload = {
@@ -548,11 +554,20 @@ export function getDocumentContent(
   actorId: string,
   tenantId: string,
   documentId: string,
+  versionId?: string,
 ): Promise<DocumentContent> {
   return request<DocumentContent>(
-    `/v1/tenants/${tenantId}/documents/${documentId}/content`,
+    `/v1/tenants/${tenantId}/documents/${documentId}/content${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`,
     actorId,
   );
+}
+
+export function getDocumentDetail(actorId: string, tenantId: string, documentId: string): Promise<DocumentDetail> {
+  return request<DocumentDetail>(`/v1/tenants/${tenantId}/documents/${documentId}`, actorId);
+}
+
+export function unpublishDocumentVersion(actorId: string, tenantId: string, versionId: string): Promise<DocumentVersion> {
+  return request<DocumentVersion>(`/v1/tenants/${tenantId}/document-versions/${versionId}/unpublish`, actorId, { method: "POST" });
 }
 
 export async function uploadDocument(
