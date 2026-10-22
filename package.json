@@ -6,6 +6,7 @@
   "scripts": {
     "dev:web": "pnpm --filter @enterprise-ai/web dev",
     "build:web": "pnpm --filter @enterprise-ai/web build",
+    "build:local-ai": "NEXT_OUTPUT_MODE=export NEXT_PUBLIC_APP_MODE=accounts NEXT_PUBLIC_API_URL='' pnpm build:web",
     "lint:web": "pnpm --filter @enterprise-ai/web lint",
     "test:web": "pnpm --filter @enterprise-ai/web typecheck"
   }

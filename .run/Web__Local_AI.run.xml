@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Web: Local AI" type="PythonConfigurationType" factoryName="Python">
+    <module name="enterprise-ai-knowledge-assistant" />
+    <option name="SDK_HOME" value="$PROJECT_DIR$/.venv/bin/python" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="IS_MODULE_SDK" value="false" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/local_ai.py" />
+    <option name="PARAMETERS" value="web" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <method v="2" />
+  </configuration>
+</component>

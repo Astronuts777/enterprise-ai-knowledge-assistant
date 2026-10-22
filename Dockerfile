@@ -22,7 +22,8 @@ ENV LOCAL_STORAGE_PATH=/tmp/enterprise-ai-uploads
 WORKDIR /app
 COPY requirements.lock ./
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client \
+    && apt-get install -y --no-install-recommends postgresql-client poppler-utils \
+       tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.lock
 COPY alembic.ini ./

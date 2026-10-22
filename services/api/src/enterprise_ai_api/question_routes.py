@@ -5,7 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from enterprise_ai_api.ai_providers import (
@@ -15,12 +15,20 @@ from enterprise_ai_api.ai_providers import (
 )
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import AnswerCitation, Document, KnowledgeAnswer, Space
+from enterprise_ai_api.models import (
+    AnswerCitation,
+    Document,
+    DocumentChunk,
+    DocumentVersion,
+    KnowledgeAnswer,
+    Space,
+)
 from enterprise_ai_api.retrieval import search_published_knowledge
 from enterprise_ai_api.schemas import (
     AnswerCitationResponse,
     KnowledgeAnswerResponse,
     KnowledgeQuestionCreate,
+    KnowledgeStatusResponse,
 )
 from enterprise_ai_api.tenancy import (
     CurrentUserId,
@@ -44,6 +52,50 @@ def get_embedding_provider(request: Request) -> EmbeddingProvider:
 
 AnswerProvider = Annotated[EvidenceAnswerProvider, Depends(get_answer_provider)]
 Embedding = Annotated[EmbeddingProvider, Depends(get_embedding_provider)]
+
+
+@router.get("/tenants/{tenant_id}/knowledge-status", response_model=KnowledgeStatusResponse)
+def knowledge_status(
+    tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSession,
+    request: Request, answer_provider: AnswerProvider, embedding_provider: Embedding,
+    space_id: UUID | None = None,
+) -> dict[str, object]:
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+    )
+    allowed = accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id)
+    scoped = [value for value in allowed if space_id is None or value == space_id]
+    restricted = bool(session.scalar(select(Space.id).where(
+        Space.id.in_(scoped), Space.classification == "restricted",
+    ).limit(1))) and not request.app.state.external_ai_allowed_for_restricted
+    embedding_enabled = embedding_provider.enabled and not (
+        restricted and embedding_provider.external
+    )
+    generation_enabled = answer_provider.name != "local" and not (
+        restricted and answer_provider.external
+    )
+    total, indexed = session.execute(
+        select(func.count(DocumentChunk.id), func.sum(case((
+            (DocumentChunk.embedding.is_not(None))
+            & (DocumentChunk.embedding_model == embedding_provider.model_name), 1,
+        ), else_=0)))
+        .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(Document.tenant_id == tenant_id, Document.space_id.in_(scoped),
+               DocumentVersion.status == "published", DocumentVersion.tenant_id == tenant_id,
+               DocumentChunk.tenant_id == tenant_id)
+    ).one()
+    return {
+        "semantic_enabled": embedding_enabled,
+        "generation_enabled": generation_enabled,
+        "restricted_by_policy": restricted and (
+            embedding_provider.external or answer_provider.external
+        ),
+        "published_chunks": total,
+        "indexed_chunks": (indexed or 0) if embedding_enabled else 0,
+        "embedding_model": embedding_provider.model_name if embedding_enabled else None,
+        "answer_model": answer_provider.model_name if generation_enabled else None,
+    }
 
 
 def _response(session: Session, answer: KnowledgeAnswer) -> KnowledgeAnswerResponse:
@@ -117,7 +169,10 @@ def ask_knowledge_question(
             retrieval_mode = "hybrid"
         except (AIProviderError, IndexError):
             logger.warning("Semantic query embedding failed", exc_info=True)
-            query_embedding = None
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="语义检索服务暂时不可用，请稍后重试；这不代表资料中没有答案。",
+            ) from None
 
     evidence = (
         []

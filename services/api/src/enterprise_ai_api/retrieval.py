@@ -13,12 +13,14 @@ from sqlalchemy.orm import Session
 from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
 
 MAX_CANDIDATE_CHUNKS = 5000
-MAX_CITATIONS = 4
-MAX_EXCERPT_CHARS = 320
+MAX_CITATIONS = 8
+MAX_EXCERPT_CHARS = 1200
 
 _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _CHINESE_SEQUENCE = re.compile(r"[\u3400-\u9fff]+")
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？.!?])\s+")
+_QUERY_FILLER = re.compile(
+    r"可以|能否|能不能|为我|帮我|请问|请|提供|介绍|一下|相关内容|相关信息|吗|呢"
+)
 _STOPWORDS = {
     "a",
     "an",
@@ -76,7 +78,7 @@ def search_published_knowledge(
 ) -> list[RetrievedEvidence]:
     """Rank published chunks using lexical coverage and optional cosine similarity."""
 
-    query_tokens = _tokens(question)
+    query_tokens = _tokens(_QUERY_FILLER.sub(" ", question))
     if not query_tokens and query_embedding is None:
         return []
 
@@ -88,17 +90,22 @@ def search_published_knowledge(
         .where(
             DocumentChunk.tenant_id == tenant_id,
             DocumentVersion.status == "published",
+            DocumentVersion.tenant_id == tenant_id,
             Document.tenant_id == tenant_id,
+            Space.tenant_id == tenant_id,
         )
         .order_by(DocumentChunk.created_at.desc(), DocumentChunk.position)
         .limit(MAX_CANDIDATE_CHUNKS)
     )
-    if space_ids:
+    if space_ids is not None:
+        if not space_ids:
+            return []
         statement = statement.where(Document.space_id.in_(space_ids))
 
     normalized_question = _normalize(question)
     ranked: list[RetrievedEvidence] = []
-    for chunk, version, document, space in session.execute(statement):
+    candidates = list(session.execute(statement))
+    for chunk, version, document, space in candidates:
         content_lexical_score = _score(normalized_question, query_tokens, chunk.text)
         metadata_lexical_score = (
             _score(
@@ -133,13 +140,47 @@ def search_published_knowledge(
         )
 
     ranked.sort(key=lambda item: (-item.score, item.document.title, item.chunk.position))
-    return ranked[:MAX_CITATIONS]
+    # Reserve anchors across documents before filling nearby context. All neighbors
+    # come from the same already-authorized, published candidate set.
+    anchors: list[RetrievedEvidence] = []
+    seen_documents: set[UUID] = set()
+    for item in ranked:
+        if item.document.id not in seen_documents:
+            anchors.append(item)
+            seen_documents.add(item.document.id)
+        if len(anchors) == 4:
+            break
+    for item in ranked:
+        if len(anchors) == 4:
+            break
+        if item not in anchors:
+            anchors.append(item)
+    selected = list(anchors)
+    selected_ids = {item.chunk.id for item in selected}
+    neighbors = {(chunk.document_version_id, chunk.position): (chunk, version, document, space)
+                 for chunk, version, document, space in candidates}
+    for offset in (1, -1):
+        for anchor in anchors:
+            neighbor = neighbors.get((anchor.version.id, anchor.chunk.position + offset))
+            if neighbor is None or neighbor[0].id in selected_ids:
+                continue
+            chunk, version, document, space = neighbor
+            selected.append(RetrievedEvidence(
+                chunk=chunk, version=version, document=document,
+                score=anchor.score * 0.8, excerpt=_best_excerpt(chunk.text, query_tokens),
+                lexical_score=0, semantic_score=None, classification=space.classification,
+            ))
+            selected_ids.add(chunk.id)
+            if len(selected) == MAX_CITATIONS:
+                return selected
+    return selected
 
 
 def build_grounded_answer(evidence: list[RetrievedEvidence]) -> tuple[str, str]:
     if not evidence:
         return (
-            "未在已发布的企业资料中找到足够依据。请补充或发布相关资料后再试。",
+            "本次检索未找到匹配的已发布正文，这不代表文件中一定没有答案。"
+            "请检查所选空间、文档解析内容及语义索引状态，或使用原文关键词重试。",
             "insufficient_evidence",
         )
 
@@ -192,10 +233,9 @@ def _is_high_signal_token(token: str) -> bool:
     """Recognize order numbers, codes, and other distinctive Latin identifiers."""
 
     return bool(_LATIN_TOKEN.fullmatch(token)) and (
-        len(token) >= 6
-        or any(character.isdigit() for character in token)
-        or "-" in token
-        or "_" in token
+        len(token) >= 4
+        and any(character.isalpha() for character in token)
+        and (any(character.isdigit() for character in token) or "-" in token or "_" in token)
     )
 
 
@@ -247,15 +287,14 @@ def _hybrid_score(lexical_score: float, semantic_score: float | None) -> float |
 
 
 def _best_excerpt(text: str, query_tokens: set[str]) -> str:
-    normalized_sentences = [
-        value.strip() for value in _SENTENCE_BOUNDARY.split(text) if value.strip()
-    ]
-    if not normalized_sentences:
-        normalized_sentences = [text.strip()]
-    best = max(
-        normalized_sentences,
-        key=lambda value: len(query_tokens & _tokens(value)),
+    value = text.strip()
+    if len(value) <= MAX_EXCERPT_CHARS:
+        return value
+    # Select a window around the strongest match, not the start of a long sentence.
+    starts = range(0, len(value), MAX_EXCERPT_CHARS // 2)
+    start = max(starts, key=lambda index: len(
+        query_tokens & _tokens(value[index:index + MAX_EXCERPT_CHARS])
+    ))
+    return ("…" if start else "") + value[start:start + MAX_EXCERPT_CHARS] + (
+        "…" if start + MAX_EXCERPT_CHARS < len(value) else ""
     )
-    if len(best) <= MAX_EXCERPT_CHARS:
-        return best
-    return best[: MAX_EXCERPT_CHARS - 1].rstrip() + "…"

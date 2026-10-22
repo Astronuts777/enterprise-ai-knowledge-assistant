@@ -260,6 +260,16 @@ class KnowledgeQuestionCreate(BaseModel):
     space_ids: list[UUID] | None = Field(default=None, max_length=50)
 
 
+class KnowledgeStatusResponse(BaseModel):
+    semantic_enabled: bool
+    generation_enabled: bool
+    restricted_by_policy: bool
+    published_chunks: int
+    indexed_chunks: int
+    embedding_model: str | None
+    answer_model: str | None
+
+
 class AnswerCitationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -282,7 +292,7 @@ class KnowledgeAnswerResponse(BaseModel):
     question: str
     answer: str
     status: Literal["grounded", "insufficient_evidence"]
-    generator: Literal["local", "openai"]
+    generator: Literal["local", "openai", "ollama"]
     model_name: str | None
     citations: list[AnswerCitationResponse]
     created_at: datetime

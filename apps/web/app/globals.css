@@ -560,6 +560,10 @@ button { cursor: pointer; }
 .current-session i { background: #74a659; border-radius: 50%; height: 0.42rem; width: 0.42rem; }
 
 .audit-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
+.knowledge-status { background: #f0f5ed; border: 1px solid var(--line); border-radius: 0.8rem; padding: 1rem; margin-bottom: 1.2rem; font-size: 0.78rem; line-height: 1.6; }
+.knowledge-status p { margin: 0.5rem 0 0; color: #53665d; }
+.knowledge-status summary { cursor: pointer; font-weight: 700; }
+.index-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.75rem; align-items: center; margin-top: 0.8rem; }
 .audit-heading-actions { align-items: center; }
 .audit-table-head, .audit-row { align-items: center; display: grid; gap: 0.8rem; grid-template-columns: minmax(230px, 1.6fr) 0.8fr 1fr 0.55fr 0.85fr; padding: 0 1.3rem; }
 .audit-table-head { background: #f0f3f0; color: #7c8b85; font-size: 0.62rem; font-weight: 800; height: 42px; text-transform: uppercase; }

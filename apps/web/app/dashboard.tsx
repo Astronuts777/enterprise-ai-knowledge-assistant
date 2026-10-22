@@ -11,6 +11,7 @@ import {
   DocumentContent,
   DocumentSummary,
   KnowledgeAnswer,
+  KnowledgeStatus,
   Membership,
   MembershipRole,
   Space,
@@ -28,6 +29,8 @@ import {
   getCurrentAccount,
   getDocumentContent,
   getTenant,
+  getKnowledgeStatus,
+  rebuildSemanticIndex,
   disableMfa,
   loginAccount,
   listDocuments,
@@ -157,6 +160,7 @@ function formatLocator(value: string): string {
   const [kind, position] = value.split(":");
   if (kind === "page") return `第 ${position} 页`;
   if (kind === "paragraph") return `第 ${position} 段`;
+  if (kind === "table") return `表 ${position} · 行 ${value.split(":")[3] ?? ""}`;
   return value;
 }
 
@@ -575,6 +579,20 @@ export default function Dashboard() {
     }
   }
 
+  async function handleReindex(summary: DocumentSummary) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      await rebuildSemanticIndex(actorId, tenantId, summary.latest_version.id);
+      setNotice("语义索引已建立，可以在助手中使用同义词或跨语言提问。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "建立语义索引失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleExportAudit() {
     if (!tenantId) return;
     setBusy(true);
@@ -863,6 +881,8 @@ export default function Dashboard() {
           )}
           {!mfaBlocked && view === "assistant" && (
             <AssistantView
+              actorId={actorId}
+              tenantId={tenant.id}
               answers={answers}
               spaces={spaces}
               documentsBySpace={documentsBySpace}
@@ -882,6 +902,7 @@ export default function Dashboard() {
               onUpload={() => { setVersionTarget(null); setUploadDialog(true); }}
               onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
               onPublish={handlePublish}
+              onReindex={handleReindex}
               onOpen={handleOpenDocument}
               canManage={canManageActiveSpace}
               onManageAccess={() => setSpaceAccessDialog(true)}
@@ -1214,9 +1235,22 @@ function Overview({ tenant, spaces, members, answers, documentsBySpace, onCreate
   </>;
 }
 
-function AssistantView({ answers, spaces, documentsBySpace, busy, onAsk }: { answers: KnowledgeAnswer[]; spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; busy: boolean; onAsk: (question: string, spaceId?: string) => Promise<void> }) {
+function AssistantView({ actorId, tenantId, answers, spaces, documentsBySpace, busy, onAsk }: { actorId: string; tenantId: string; answers: KnowledgeAnswer[]; spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; busy: boolean; onAsk: (question: string, spaceId?: string) => Promise<void> }) {
   const [question, setQuestion] = useState("");
   const [spaceId, setSpaceId] = useState("");
+  const statusKey = `${actorId}:${tenantId}:${spaceId}:${answers.length}`;
+  const [statusResult, setStatusResult] = useState<{ key: string; value: KnowledgeStatus | null; error: boolean } | null>(null);
+  const knowledgeStatus = statusResult?.key === statusKey ? statusResult.value : null;
+  const statusError = statusResult?.key === statusKey && statusResult.error;
+  useEffect(() => {
+    let cancelled = false;
+    getKnowledgeStatus(actorId, tenantId, spaceId || undefined).then((value) => {
+      if (!cancelled) setStatusResult({ key: statusKey, value, error: false });
+    }).catch(() => {
+      if (!cancelled) setStatusResult({ key: statusKey, value: null, error: true });
+    });
+    return () => { cancelled = true; };
+  }, [actorId, tenantId, spaceId, statusKey]);
   const publishedCount = Object.values(documentsBySpace)
     .flat()
     .filter((item) => item.latest_version.status === "published").length;
@@ -1231,7 +1265,15 @@ function AssistantView({ answers, spaces, documentsBySpace, busy, onAsk }: { ans
   }
 
   return <>
-    <div className="page-heading assistant-heading"><div><p className="kicker">证据优先</p><h1>AI 决策助手</h1><p>只基于已发布的企业资料回答，并为每项结论保留原文位置。</p></div><span className="assistant-mode"><i />本地证据模式</span></div>
+    <div className="page-heading assistant-heading"><div><p className="kicker">证据优先</p><h1>AI 决策助手</h1><p>只基于已发布的企业资料回答，并为每项结论保留原文位置。</p></div><span className="assistant-mode"><i />{knowledgeStatus ? (knowledgeStatus.generation_enabled ? "AI 综合回答" : "本地原文摘录") : "模式待确认"}</span></div>
+    <section className="knowledge-status" aria-live="polite">
+      {statusError ? <p>暂时无法读取检索能力状态，请刷新后重试。</p> : !knowledgeStatus ? <p>正在检查知识库状态…</p> : <>
+        <b>{knowledgeStatus.semantic_enabled ? "语义与关键词混合检索" : "关键词检索"} · {knowledgeStatus.published_chunks} 个已发布正文片段</b>
+        <p>{knowledgeStatus.semantic_enabled ? `当前模型已索引 ${knowledgeStatus.indexed_chunks}/${knowledgeStatus.published_chunks} 个片段。` : "尚未启用语义检索，跨语言和同义词提问可能找不到资料。"}{!knowledgeStatus.generation_enabled && " 当前回答是原文摘录，尚未启用模型综合分析。"}</p>
+        {knowledgeStatus.semantic_enabled && knowledgeStatus.indexed_chunks < knowledgeStatus.published_chunks && <p>部分资料尚未建立当前模型的索引，请空间管理员在文档列表点击“建立语义索引”。</p>}
+        {knowledgeStatus.restricted_by_policy && <p>当前范围包含严格受限空间，其策略禁止调用外部模型；可以选择其他获准访问的空间。</p>}
+      </>}
+    </section>
     <section className="assistant-layout">
       <div className="assistant-main">
         <form className="question-composer" onSubmit={submit}>
@@ -1240,7 +1282,7 @@ function AssistantView({ answers, spaces, documentsBySpace, busy, onAsk }: { ans
           <div className="composer-actions"><small>{publishedCount ? `正在检索 ${publishedCount} 份已发布资料` : "尚无已发布资料，助手会明确提示依据不足"}</small><button className="primary-button" disabled={busy || question.trim().length < 2} type="submit">{busy ? "检索证据中…" : "获取可信回答"}<Icon name="send" /></button></div>
         </form>
 
-        {answers.length === 0 ? <section className="assistant-empty"><span><Icon name="assistant" /></span><h2>从一个具体问题开始</h2><p>问题越明确，原文定位越准确。只有已发布版本会进入检索范围。</p><div>{suggestions.map((suggestion) => <button key={suggestion} onClick={() => setQuestion(suggestion)} type="button">{suggestion}</button>)}</div></section> : <section className="answer-history" aria-label="问答历史">{answers.map((item) => <article className="answer-card" key={item.id}><div className="question-row"><span>你</span><div><small>{formatDate(item.created_at)}</small><h2>{item.question}</h2></div></div><div className="answer-row"><span><Icon name="assistant" /></span><div><div className="answer-meta"><b>{item.generator === "openai" ? "AI 证据式回答" : "本地证据式回答"}</b><em className={item.status}>{item.status === "grounded" ? `${item.citations.length} 条引用` : "依据不足"}</em></div><p>{item.answer}</p>{item.citations.length > 0 && <div className="citations"><h3><Icon name="quote" />原文依据</h3>{item.citations.map((citation) => <blockquote key={citation.citation_number}><span>[{citation.citation_number}]</span><div><b>{citation.document_title}</b><small>v{citation.version_number} · {formatLocator(citation.locator)} · {citation.filename}</small><p>{citation.excerpt}</p></div></blockquote>)}</div>}</div></div></article>)}</section>}
+        {answers.length === 0 ? <section className="assistant-empty"><span><Icon name="assistant" /></span><h2>从一个具体问题开始</h2><p>问题越明确，原文定位越准确。只有已发布版本会进入检索范围。</p><div>{suggestions.map((suggestion) => <button key={suggestion} onClick={() => setQuestion(suggestion)} type="button">{suggestion}</button>)}</div></section> : <section className="answer-history" aria-label="问答历史">{answers.map((item) => <article className="answer-card" key={item.id}><div className="question-row"><span>你</span><div><small>{formatDate(item.created_at)}</small><h2>{item.question}</h2></div></div><div className="answer-row"><span><Icon name="assistant" /></span><div><div className="answer-meta"><b>{item.generator === "ollama" ? "本地 AI 综合回答" : item.generator === "openai" ? "AI 证据式回答" : "本地原文摘录"}</b><em className={item.status}>{item.status === "grounded" ? `${item.citations.length} 条引用` : "依据不足"}</em></div><p>{item.answer}</p>{item.citations.length > 0 && <div className="citations"><h3><Icon name="quote" />原文依据</h3>{item.citations.map((citation) => <blockquote key={citation.citation_number}><span>[{citation.citation_number}]</span><div><b>{citation.document_title}</b><small>v{citation.version_number} · {formatLocator(citation.locator)} · {citation.filename}</small><p>{citation.excerpt}</p></div></blockquote>)}</div>}</div></div></article>)}</section>}
       </div>
       <aside className="assistant-guide"><p className="kicker">可信边界</p><h2>这个助手会做什么</h2><ul><li><Icon name="shield" /><div><b>只读已发布资料</b><span>草稿、失败版本和已替代版本不会参与回答。</span></div></li><li><Icon name="quote" /><div><b>保留原文位置</b><span>每条引用显示文件、版本、页码或段落。</span></div></li><li><Icon name="assistant" /><div><b>没有证据就拒答</b><span>外部模型即使已配置，也只能使用本次获准访问的证据。</span></div></li></ul></aside>
     </section>
@@ -1253,10 +1295,11 @@ function SpacesView({ spaces, documentsBySpace, onCreate, onOpen }: { spaces: Sp
   </>;
 }
 
-function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onOpen, onManageAccess }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onOpen: (document: DocumentSummary) => void; onManageAccess: () => void }) {
+function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onOpen, onManageAccess, onReindex }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onOpen: (document: DocumentSummary) => void; onManageAccess: () => void; onReindex: (document: DocumentSummary) => void }) {
   const statusLabels = { ready: "待发布", published: "已发布", superseded: "已替代", failed: "解析失败" };
   return <>
     <button className="back-button" onClick={onBack}><Icon name="back" />返回知识空间</button>
+    {canManage && documents.length > 0 && <details className="knowledge-status"><summary>语义检索索引管理</summary><p>配置模型后，可为旧资料建立或更新索引。若使用外部模型，此操作会将文档解析正文发送给已配置的模型服务。索引不改变发布状态。</p>{documents.filter((item) => ["ready", "published"].includes(item.latest_version.status)).map((item) => <div className="index-row" key={item.document.id}><span>{item.document.title} · v{item.latest_version.version_number}</span><button className="secondary-button" disabled={busy} onClick={() => onReindex(item)}>建立语义索引</button></div>)}</details>}
     <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>只有获得该空间授权的成员可以读取资料和参与检索。</p></div><div className="heading-actions">{canManage && <button className="secondary-button" onClick={onManageAccess}><Icon name="shield" />管理访问</button>}{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button>}</div></div>
     {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有已发布资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><button className="document-open" disabled={busy} onClick={() => onOpen(item)}><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></button><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions"><button className="view-action" disabled={busy} onClick={() => onOpen(item)}>查看</button>{canManage && item.latest_version.status === "ready" && <button className="publish-action" disabled={busy} onClick={() => onPublish(item)}>发布</button>}{canManage && <button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button>}{!canManage && <span>只读</span>}</div></article>)}</section>}
   </>;

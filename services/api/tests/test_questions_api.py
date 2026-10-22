@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from enterprise_ai_api.ai_providers import AnswerDraft
+from enterprise_ai_api.ai_providers import AIProviderError, AnswerDraft
 from enterprise_ai_api.main import create_app
 
 ADMIN_A = UUID("00000000-0000-0000-0000-00000000000a")
@@ -347,3 +347,62 @@ def test_restricted_space_blocks_external_embedding_and_answer(tmp_path: Path) -
     assert reindex.status_code == 409
     assert embedding_provider.calls == []
     assert answer_provider.calls == 0
+
+
+def test_status_and_neighbors_respect_space_access(tmp_path: Path) -> None:
+    app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"))
+    with TestClient(app) as client:
+        tenant, allowed = create_workspace(client, ADMIN_A, "Acme")
+        secret = client.post(
+            f"/v1/tenants/{tenant}/spaces", json={"name": "Secret"}, headers=headers(ADMIN_A),
+        ).json()["id"]
+        upload_document(client, tenant, allowed,
+                        b"Travel allowance rules.\n\nThe maximum is 180 AUD per night.",
+                        publish=True)
+        upload_document(client, tenant, secret,
+                        b"Travel allowance rules.\n\nSecret maximum is 999 AUD.", publish=True)
+        client.post(f"/v1/tenants/{tenant}/members",
+                    json={"user_id": str(MEMBER_A), "role": "member"}, headers=headers(ADMIN_A))
+        client.post(f"/v1/tenants/{tenant}/spaces/{allowed}/members",
+                    json={"user_id": str(MEMBER_A), "role": "viewer"}, headers=headers(ADMIN_A))
+        result = client.post(f"/v1/tenants/{tenant}/questions",
+                             json={"question": "Travel allowance rules"},
+                             headers=headers(MEMBER_A)).json()
+        assert "180 AUD" in result["answer"]
+        assert "999" not in result["answer"]
+        assert {item["locator"] for item in result["citations"]} == {
+            "paragraph:1", "paragraph:2",
+        }
+        status = client.get(f"/v1/tenants/{tenant}/knowledge-status",
+                            headers=headers(MEMBER_A)).json()
+        assert status["published_chunks"] == 2 and status["indexed_chunks"] == 0
+        denied_scope = client.get(f"/v1/tenants/{tenant}/knowledge-status?space_id={secret}",
+                                  headers=headers(MEMBER_A)).json()
+        assert denied_scope["published_chunks"] == 0
+        cross_tenant = client.get(f"/v1/tenants/{tenant}/knowledge-status",
+                                  headers=headers(ADMIN_B))
+        assert cross_tenant.status_code == 404
+
+
+def test_local_semantic_status_and_outage_are_not_no_evidence(tmp_path: Path) -> None:
+    embedding = FakeEmbeddingProvider()
+    app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"),
+                     embedding_provider=embedding)
+    with TestClient(app) as client:
+        tenant, space = create_workspace(client, ADMIN_A, "Acme", classification="restricted")
+        upload_document(client, tenant, space, b"Hotel limit is 180 AUD.", publish=True)
+        upload_document(client, tenant, space, b"Draft meals limit is 65 AUD.", publish=False)
+        status = client.get(f"/v1/tenants/{tenant}/knowledge-status",
+                            headers=headers(ADMIN_A)).json()
+        assert status["semantic_enabled"] is True
+        assert status["restricted_by_policy"] is False
+        assert status["published_chunks"] == status["indexed_chunks"] == 1
+
+        def unavailable(texts):
+            raise AIProviderError("Model unavailable")
+
+        embedding.embed = unavailable
+        response = client.post(f"/v1/tenants/{tenant}/questions",
+                               json={"question": "酒店限额是多少？"}, headers=headers(ADMIN_A))
+        assert response.status_code == 503
+        assert "不代表资料中没有答案" in response.json()["detail"]

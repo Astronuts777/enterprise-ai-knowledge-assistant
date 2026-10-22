@@ -22,7 +22,7 @@
 7. 预览解析结果，发布可检索版本，并为同一文档上传后续版本。
 8. 点击文档打开安全阅读器；空间查看者只能读取已发布版本，空间管理者可以预览待发布版本。
 9. 只针对当前用户获准访问的已发布资料提问，得到带文件名、版本、页码或段落位置的证据式回答。
-10. 可选启用语义向量混合检索和外部生成模型；模型引用会由服务端校验并重新编号。
+10. 可选启用 Ollama 本地多语言语义检索与模型综合回答，也保留外部服务适配器；模型引用由服务端校验并重新编号。
 11. 在资料不足时明确拒答，不用没有来源的内容补全答案。
 12. 保存当前用户自己的问答历史，并阻止跨企业、跨空间读取数据。
 13. 由企业管理员查看身份、权限、文档阅读和问答操作的追加式审计日志，并导出防公式注入的合规 CSV 快照。
@@ -45,7 +45,7 @@
 - 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
 - 登录按账号和网络来源进行数据库级限流；支持 TOTP 身份验证器双重验证、一次性恢复码、恢复码轮换、验证码防重放和限时 MFA 挑战；企业可对管理员或全员强制执行 MFA。用户可查看并撤销登录设备，企业管理员可强制成员下线。企业 SSO 和异常检测尚未接入。
 - 当前语义检索在授权后的加密向量候选集中由应用计算，适合现阶段规模；数据库内 pgvector 检索仍在路线图中。
-- SCIM、OCR、云盘连接器、决策证据包、审批和不可变审计归档仍在路线图中。
+- PDF 支持本地中英文 OCR，DOCX 表格保留表头与行定位；OCR 仍可能误识别数字、复杂表格和低清扫描件，必须在发布前核对解析结果。SCIM、云盘连接器、决策证据包、审批和不可变审计归档仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
@@ -199,6 +199,83 @@ NEXT_PUBLIC_APP_MODE=accounts pnpm dev:web
 
 同一个本地数据库必须持续使用同一密钥；密钥变化后，之前加密的数据将无法解密。
 
+#### 本地 AI 完整运行（Ollama，不发送资料给外部模型）
+
+这里的 `AI_PROVIDER=local` 指**关键词检索＋原文摘录**，不是本地大模型。
+真正的本地模型模式是 `AI_PROVIDER=ollama` 和 `EMBEDDING_PROVIDER=ollama`。
+
+本地组合为 [Qwen3 4B](https://ollama.com/library/qwen3:4b)（整理答案）和
+[BGE-M3](https://ollama.com/library/bge-m3)（多语言语义检索）。下载模型需要联网，
+运行时问题、正文、向量与推理留在本机；关闭云端模型，并且应用只接受回环地址、禁用 HTTP 代理及重定向。
+这不代表模型答案绝对正确，引用校验也不能证明每个结论都忠实于原文。
+
+1. 安装 [Ollama](https://ollama.com/download)（本次验证版本 0.40.8）。本机已安装的独立版本也可位于
+   `work/ollama-runtime/ollama`，启动器会优先使用它。
+2. 终端一启动专用本地模型服务（端口 11435，与常用默认端口分开）：
+
+   ```bash
+   .venv/bin/python scripts/local_ai.py model
+   ```
+
+   如果运行环境无法访问 GPU，改用 `.venv/bin/python scripts/local_ai.py model --cpu`。
+   启动器设置 `OLLAMA_NO_CLOUD=1`、仅监听 `127.0.0.1`，模型保存在 `work/ollama-models/`。
+   首次使用下载两个模型（仅需要一次，合计约 3.7 GB）：
+
+   ```bash
+   curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen3:4b"}'
+   curl http://127.0.0.1:11435/api/pull -d '{"model":"bge-m3"}'
+   ```
+
+3. 构建同源账号版网页，然后终端二启动 Web＋API：
+
+   ```bash
+   pnpm build:local-ai
+   .venv/bin/python scripts/local_ai.py web
+   ```
+
+4. 访问 **http://127.0.0.1:8201**，注册本地账号及企业，创建空间，上传资料，
+   核对正文并发布，再进入 AI 决策助手提问。PyCharm 也可分别运行
+   **AI: Local Ollama** 和 **Web: Local AI**；同一服务不要重复启动。
+
+本地 AI 使用独立的 `data/local/ollama/enterprise.db` 和 `uploads/`，不会自动导入线上账号或资料。
+密钥自动保存到 `data/local/ollama/master.key`（权限 0600），不要删除、公开或提交 Git。
+加密涵盖敏感字段、向量和上传文件，不是整个 SQLite 文件的透明加密；应同时启用磁盘加密、访问控制并保管密钥备份。
+OCR 使用短暂的私有明文临时文件，处理后自动清理；它们仍受本机磁盘安全保护的约束。
+电脑休眠或停止服务后，本地网页/AI 不再可用。
+
+扫描 PDF 额外需要 Poppler、Tesseract 和 `eng`、`chi_sim` 语言包。
+macOS 可在自己的终端运行 `brew install poppler tesseract tesseract-lang`。
+本项目这台机器也支持已安装在 `work/ocr/` 的独立 OCR 环境，启动器会自动加入路径。
+Docker 镜像已声明对应系统依赖。PDF 最多 100 页，其中需要 OCR 的图片页面最多 10 页，
+OCR 总时间预算 90 秒；当前采取保守策略，含图片的页面会做 OCR，包含图片的封面也可能需要人工处理。
+未安装 OCR、识别失败或超限时标记解析失败，不把部分正文伪装成解析成功。
+复杂表格的单元格关系仍不能保证完整恢复。
+
+已有资料的升级方式：
+
+- 正文完整但没有向量：空间管理员在文档列表展开“语义检索索引管理”，点击“建立语义索引”。
+- 原来漏掉了表格/扫描正文：先上传新版本并检查解析结果，再发布；重建向量不会重新解析原始文件。
+- 助手页面显示当前检索配置和已索引片段数，**这不是模型实时健康检查**；模型服务故障返回错误，不误报“资料中没有答案”。
+- 当前候选检索最多处理授权范围内最近 5,000 个片段，并取有限相关片段及相邻正文；不能保证对整库做穷尽总结。
+- 本地问答关闭自动截断和上下文滑动；超过模型上下文限制时返回错误，请缩小问题/空间范围，不会悄悄丢掉证据后继续回答。
+
+本地模型服务不会自动接到 Render 公网网站，Render 的 `127.0.0.1` 不是你的 Mac。
+不要暴露 Ollama 端口，也不要把公网配置直接改成你电脑的回环地址。
+企业正式上线需要在受控服务器部署模型和应用，并另行规划私网、安全边界、并发、备份及运维。
+
+可复现验证（只使用合成测试资料）：
+
+```bash
+.venv/bin/pytest
+RUN_LOCAL_AI_TESTS=1 OLLAMA_BASE_URL=http://127.0.0.1:11435 \
+  .venv/bin/pytest services/api/tests/test_local_ai_live.py -s
+PATH="$PWD/work/ocr/bin:$PATH" TESSDATA_PREFIX="$PWD/work/ocr/share/tessdata" \
+  RUN_LOCAL_OCR_TESTS=1 .venv/bin/pytest services/api/tests/test_ocr_live.py -s
+```
+
+真实模型验证涵盖中文问英文资料、跨文件答案、同义表达和无依据拒答；OCR 验证使用真正的图片型 PDF。
+它们是冒烟测试，不代替使用企业实际文件做准确率、安全及压力评测。
+
 ### 5. 使用 PyCharm 启动
 
 1. 用 PyCharm 打开仓库根目录。
@@ -346,10 +423,12 @@ S3 兼容服务，而不改变业务数据模型。
 | `OBJECT_STORAGE_PREFIX` | 同一存储桶内的环境隔离前缀 | 无 |
 | `OBJECT_STORAGE_FORCE_PATH_STYLE` | MinIO 等服务是否强制 path-style URL | `false` |
 | `OBJECT_STORAGE_SSE` | 可选服务端加密算法，例如 AWS 的 `AES256` | 无 |
-| `AI_PROVIDER` | 回答生成：`local` 或 `openai` | `local` |
-| `EMBEDDING_PROVIDER` | 语义嵌入：`disabled` 或 `openai` | `disabled` |
-| `AI_MODEL` | 外部回答模型名称；启用 `openai` 回答时必填 | 无 |
-| `EMBEDDING_MODEL` | 外部嵌入模型名称；启用 `openai` 嵌入时必填 | 无 |
+| `AI_PROVIDER` | 回答生成：`local`、`ollama` 或 `openai` | `local` |
+| `EMBEDDING_PROVIDER` | 语义嵌入：`disabled`、`ollama` 或 `openai` | `disabled` |
+| `AI_MODEL` | 回答模型名称；启用 `openai` 时必填 | Ollama：`qwen3:4b` |
+| `EMBEDDING_MODEL` | 嵌入模型名称；启用 `openai` 时必填 | Ollama：`bge-m3` |
+| `OLLAMA_BASE_URL` | 仅允许 API 所在机器的回环 HTTP(S) 地址 | `http://127.0.0.1:11434`；本地启动器使用 11435 |
+| `OLLAMA_TIMEOUT_SECONDS` | 本地模型请求超时，范围 1–600 秒 | `180` |
 | `EMBEDDING_DIMENSIONS` | 可选嵌入维度，范围 1–4096 | 由模型决定 |
 | `OPENAI_API_KEY` | OpenAI API 密钥，只能保存于 Secret 管理器 | 无 |
 | `OPENAI_BASE_URL` / `OPENAI_PROJECT` | OpenAI API 根地址和可选 Project | 官方 API / 无 |

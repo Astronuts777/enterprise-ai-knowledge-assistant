@@ -103,6 +103,24 @@ export type DocumentContent = {
 
 export type AnswerStatus = "grounded" | "insufficient_evidence";
 
+export type KnowledgeStatus = {
+  semantic_enabled: boolean;
+  generation_enabled: boolean;
+  restricted_by_policy: boolean;
+  published_chunks: number;
+  indexed_chunks: number;
+  embedding_model: string | null;
+  answer_model: string | null;
+};
+
+export function getKnowledgeStatus(actorId: string, tenantId: string, spaceId?: string): Promise<KnowledgeStatus> {
+  return request<KnowledgeStatus>(`/v1/tenants/${tenantId}/knowledge-status${spaceId ? `?space_id=${encodeURIComponent(spaceId)}` : ""}`, actorId);
+}
+
+export function rebuildSemanticIndex(actorId: string, tenantId: string, versionId: string): Promise<DocumentVersion> {
+  return request<DocumentVersion>(`/v1/tenants/${tenantId}/document-versions/${versionId}/semantic-index`, actorId, { method: "POST" });
+}
+
 export type AnswerCitation = {
   citation_number: number;
   document_id: string;
@@ -123,7 +141,7 @@ export type KnowledgeAnswer = {
   question: string;
   answer: string;
   status: AnswerStatus;
-  generator: "local" | "openai";
+  generator: "local" | "openai" | "ollama";
   model_name: string | null;
   citations: AnswerCitation[];
   created_at: string;
