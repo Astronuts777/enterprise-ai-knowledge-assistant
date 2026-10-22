@@ -7,12 +7,13 @@ import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
 
-MAX_CANDIDATE_CHUNKS = 5000
+RETRIEVAL_BATCH_SIZE = 256
+MAX_ANCHORS = 4
 MAX_CITATIONS = 8
 MAX_EXCERPT_CHARS = 1200
 
@@ -67,6 +68,17 @@ class RetrievedEvidence:
     classification: str
 
 
+def _rank_key(item: RetrievedEvidence) -> tuple[float, str, int, str]:
+    # Stable tie-breaking must not depend on DB row order or fetch batch size.
+    return (-item.score, item.document.title, item.chunk.position, str(item.chunk.id))
+
+
+def _retain_best(items: list[RetrievedEvidence], item: RetrievedEvidence) -> None:
+    items.append(item)
+    items.sort(key=_rank_key)
+    del items[MAX_ANCHORS:]
+
+
 def search_published_knowledge(
     session: Session,
     *,
@@ -94,8 +106,6 @@ def search_published_knowledge(
             Document.tenant_id == tenant_id,
             Space.tenant_id == tenant_id,
         )
-        .order_by(DocumentChunk.created_at.desc(), DocumentChunk.position)
-        .limit(MAX_CANDIDATE_CHUNKS)
     )
     if space_ids is not None:
         if not space_ids:
@@ -103,31 +113,27 @@ def search_published_knowledge(
         statement = statement.where(Document.space_id.in_(space_ids))
 
     normalized_question = _normalize(question)
-    ranked: list[RetrievedEvidence] = []
-    candidates = list(session.execute(statement))
-    for chunk, version, document, space in candidates:
-        content_lexical_score = _score(normalized_question, query_tokens, chunk.text)
-        metadata_lexical_score = (
-            _score(
-                normalized_question,
-                query_tokens,
-                f"{document.title} {version.filename}",
+    best_chunks: list[RetrievedEvidence] = []
+    best_documents: list[RetrievedEvidence] = []
+    # No corpus-size cutoff: SQL applies authorization/publication filters before
+    # encrypted fields are loaded. Streaming bounds ORM/driver buffering, while
+    # two top-k lists bound retained matches even when every chunk is relevant.
+    with session.execute(statement.execution_options(yield_per=RETRIEVAL_BATCH_SIZE)) as rows:
+        for chunk, version, document, space in rows:
+            content_lexical_score = _score(normalized_question, query_tokens, chunk.text)
+            metadata_lexical_score = (
+                _score(normalized_question, query_tokens, f"{document.title} {version.filename}")
+                if chunk.position == 1 else 0
             )
-            if chunk.position == 1
-            else 0
-        )
-        lexical_score = max(content_lexical_score, metadata_lexical_score)
-        semantic_score = _semantic_score(
-            query_embedding,
-            chunk.embedding,
-            query_model=embedding_model,
-            chunk_model=chunk.embedding_model,
-        )
-        score = _hybrid_score(lexical_score, semantic_score)
-        if score is None:
-            continue
-        ranked.append(
-            RetrievedEvidence(
+            lexical_score = max(content_lexical_score, metadata_lexical_score)
+            semantic_score = _semantic_score(
+                query_embedding, chunk.embedding,
+                query_model=embedding_model, chunk_model=chunk.embedding_model,
+            )
+            score = _hybrid_score(lexical_score, semantic_score)
+            if score is None:
+                continue
+            item = RetrievedEvidence(
                 chunk=chunk,
                 version=version,
                 document=document,
@@ -137,28 +143,38 @@ def search_published_knowledge(
                 semantic_score=semantic_score,
                 classification=space.classification,
             )
-        )
+            _retain_best(best_chunks, item)
+            existing = next((entry for entry in best_documents
+                             if entry.document.id == document.id), None)
+            if existing is None:
+                _retain_best(best_documents, item)
+            elif _rank_key(item) < _rank_key(existing):
+                best_documents.remove(existing)
+                _retain_best(best_documents, item)
 
-    ranked.sort(key=lambda item: (-item.score, item.document.title, item.chunk.position))
-    # Reserve anchors across documents before filling nearby context. All neighbors
-    # come from the same already-authorized, published candidate set.
-    anchors: list[RetrievedEvidence] = []
-    seen_documents: set[UUID] = set()
-    for item in ranked:
-        if item.document.id not in seen_documents:
-            anchors.append(item)
-            seen_documents.add(item.document.id)
-        if len(anchors) == 4:
+    # Reserve one anchor per document, then fill unused slots with global top-k.
+    anchors = list(best_documents)
+    anchor_ids = {item.chunk.id for item in anchors}
+    for item in best_chunks:
+        if len(anchors) == MAX_ANCHORS:
             break
-    for item in ranked:
-        if len(anchors) == 4:
-            break
-        if item not in anchors:
+        if item.chunk.id not in anchor_ids:
             anchors.append(item)
+            anchor_ids.add(item.chunk.id)
+    if not anchors:
+        return []
     selected = list(anchors)
     selected_ids = {item.chunk.id for item in selected}
+    # Fetch only the at-most-eight adjacent positions, with exactly the same
+    # tenant/space/publication predicates. Close the scan cursor before this query.
+    neighbor_positions = [and_(
+        DocumentChunk.document_version_id == anchor.version.id,
+        DocumentChunk.position.in_([anchor.chunk.position - 1, anchor.chunk.position + 1]),
+    ) for anchor in anchors]
     neighbors = {(chunk.document_version_id, chunk.position): (chunk, version, document, space)
-                 for chunk, version, document, space in candidates}
+                 for chunk, version, document, space in session.execute(
+                     statement.where(or_(*neighbor_positions))
+                 )}
     for offset in (1, -1):
         for anchor in anchors:
             neighbor = neighbors.get((anchor.version.id, anchor.chunk.position + offset))
