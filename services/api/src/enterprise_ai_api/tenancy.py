@@ -125,6 +125,7 @@ def authorize_tenant_action(
     tenant_id: UUID,
     user_id: UUID,
     action: Action,
+    enforce_mfa: bool = True,
 ) -> Tenant:
     """Resolve tenant and membership without revealing cross-tenant existence."""
 
@@ -165,7 +166,38 @@ def authorize_tenant_action(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Resource not found or access denied",
         ) from error
+    if enforce_mfa and tenant_mfa_required(tenant, membership):
+        user = session.get(User, user_id)
+        if user is None or user.mfa_enabled_at is None:
+            record_audit_event(
+                session,
+                tenant_id=tenant_id,
+                actor_id=user_id,
+                action="authorization.denied",
+                resource_type="tenant",
+                resource_id=tenant_id,
+                outcome="denied",
+                details={
+                    "requested_action": action.value,
+                    "reason": "mfa_policy",
+                    "mfa_policy": tenant.mfa_policy,
+                },
+            )
+            session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MFA required by enterprise policy",
+            )
     return tenant
+
+
+def tenant_mfa_required(tenant: Tenant, membership: Membership) -> bool:
+    if tenant.mfa_policy == "all":
+        return True
+    return tenant.mfa_policy == "admins" and membership.role in {
+        Role.ENTERPRISE_ADMIN.value,
+        Role.KNOWLEDGE_ADMIN.value,
+    }
 
 
 def tenant_membership(session: Session, tenant_id: UUID, user_id: UUID) -> Membership | None:

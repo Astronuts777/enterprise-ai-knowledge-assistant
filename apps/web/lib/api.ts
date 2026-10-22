@@ -2,6 +2,8 @@ export type Tenant = {
   id: string;
   name: string;
   status: string;
+  mfa_policy: "off" | "admins" | "all";
+  mfa_required_for_current_user: boolean;
   created_at: string;
 };
 
@@ -267,6 +269,16 @@ export function confirmMfaSetup(code: string): Promise<{ recovery_codes: string[
   });
 }
 
+export function regenerateMfaRecoveryCodes(
+  password: string,
+  code: string,
+): Promise<{ recovery_codes: string[] }> {
+  return accountRequest<{ recovery_codes: string[] }>("/v1/auth/mfa/recovery-codes", {
+    method: "POST",
+    body: JSON.stringify({ password, code }),
+  });
+}
+
 export function disableMfa(password: string, code: string): Promise<Account> {
   return accountRequest<Account>("/v1/auth/mfa", {
     method: "DELETE",
@@ -370,6 +382,17 @@ export function createTenant(actorId: string, name: string): Promise<Tenant> {
 
 export function getTenant(actorId: string, tenantId: string): Promise<Tenant> {
   return request<Tenant>(`/v1/tenants/${tenantId}`, actorId);
+}
+
+export function updateTenantSecurityPolicy(
+  actorId: string,
+  tenantId: string,
+  mfaPolicy: Tenant["mfa_policy"],
+): Promise<Tenant> {
+  return request<Tenant>(`/v1/tenants/${tenantId}/security-policy`, actorId, {
+    method: "PATCH",
+    body: JSON.stringify({ mfa_policy: mfaPolicy }),
+  });
 }
 
 export function listSpaces(actorId: string, tenantId: string): Promise<Space[]> {

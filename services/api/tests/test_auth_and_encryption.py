@@ -317,7 +317,12 @@ def test_totp_mfa_challenges_login_and_recovery_codes_are_one_time() -> None:
             "/v1/auth/mfa/confirm",
             json={"code": totp_code(secret, current_counter)},
         )
-        recovery_codes = confirmed.json()["recovery_codes"]
+        old_recovery_codes = confirmed.json()["recovery_codes"]
+        regenerated = client.post(
+            "/v1/auth/mfa/recovery-codes",
+            json={"password": PASSWORD, "code": old_recovery_codes[0]},
+        )
+        recovery_codes = regenerated.json()["recovery_codes"]
 
         with app.state.engine.connect() as connection:
             stored_secret = connection.exec_driver_sql(
@@ -377,7 +382,9 @@ def test_totp_mfa_challenges_login_and_recovery_codes_are_one_time() -> None:
     assert setup.status_code == 200
     assert setup.json()["otpauth_uri"].startswith("otpauth://totp/")
     assert confirmed.status_code == 200
+    assert regenerated.status_code == 200
     assert len(recovery_codes) == 8
+    assert set(recovery_codes).isdisjoint(old_recovery_codes)
     assert stored_secret.startswith("enc:v1:")
     assert secret not in stored_secret
     assert all(code.replace("-", "") not in stored_codes for code in recovery_codes)
@@ -392,6 +399,84 @@ def test_totp_mfa_challenges_login_and_recovery_codes_are_one_time() -> None:
     assert disabled.json()["mfa_enabled"] is False
     assert password_only.status_code == 200
     assert password_only.json()["mfa_required"] is False
+
+
+def test_enterprise_mfa_policy_blocks_resources_until_member_enrolls() -> None:
+    app = create_app("sqlite://", account_auth=True)
+    with TestClient(app) as admin, TestClient(app) as member:
+        owner = register(admin, "policy-owner@example.com", organization_name="Policy Acme")
+        tenant_id = owner["tenant_id"]
+        refused_before_enrollment = admin.patch(
+            f"/v1/tenants/{tenant_id}/security-policy",
+            json={"mfa_policy": "all"},
+        )
+
+        admin_setup = admin.post("/v1/auth/mfa/setup", json={"password": PASSWORD})
+        admin_secret = admin_setup.json()["secret"]
+        admin_confirmed = admin.post(
+            "/v1/auth/mfa/confirm",
+            json={"code": totp_code(admin_secret, int(time()) // TOTP_PERIOD_SECONDS)},
+        )
+        admin_recovery_code = admin_confirmed.json()["recovery_codes"][0]
+        policy_enabled = admin.patch(
+            f"/v1/tenants/{tenant_id}/security-policy",
+            json={"mfa_policy": "admins"},
+        )
+
+        register(member, "policy-member@example.com")
+        invitation = admin.post(
+            f"/v1/tenants/{tenant_id}/invitations",
+            json={"email": "policy-member@example.com", "role": "member"},
+        )
+        member.post(
+            f"/v1/auth/invitations/{tenant_id}/accept",
+            json={"token": invitation.json()["invite_token"]},
+        )
+        member_allowed_by_admin_policy = member.get(f"/v1/tenants/{tenant_id}/spaces")
+        policy_all = admin.patch(
+            f"/v1/tenants/{tenant_id}/security-policy",
+            json={"mfa_policy": "all"},
+        )
+        tenant_metadata = member.get(f"/v1/tenants/{tenant_id}")
+        blocked = member.get(f"/v1/tenants/{tenant_id}/spaces")
+
+        member_setup = member.post("/v1/auth/mfa/setup", json={"password": PASSWORD})
+        member_secret = member_setup.json()["secret"]
+        member_confirmed = member.post(
+            "/v1/auth/mfa/confirm",
+            json={"code": totp_code(member_secret, int(time()) // TOTP_PERIOD_SECONDS)},
+        )
+        tenant_after_enrollment = member.get(f"/v1/tenants/{tenant_id}")
+        allowed = member.get(f"/v1/tenants/{tenant_id}/spaces")
+        disable_blocked = admin.request(
+            "DELETE",
+            "/v1/auth/mfa",
+            json={"password": PASSWORD, "code": admin_recovery_code},
+        )
+        audit = admin.get(
+            f"/v1/tenants/{tenant_id}/audit-events?action=tenant.security_policy_updated"
+        )
+
+    assert refused_before_enrollment.status_code == 409
+    assert admin_setup.status_code == 200
+    assert admin_confirmed.status_code == 200
+    assert policy_enabled.status_code == 200
+    assert policy_enabled.json()["mfa_policy"] == "admins"
+    assert invitation.status_code == 201
+    assert member_allowed_by_admin_policy.status_code == 200
+    assert policy_all.status_code == 200
+    assert policy_all.json()["mfa_policy"] == "all"
+    assert tenant_metadata.status_code == 200
+    assert tenant_metadata.json()["mfa_required_for_current_user"] is True
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "MFA required by enterprise policy"
+    assert member_setup.status_code == 200
+    assert member_confirmed.status_code == 200
+    assert tenant_after_enrollment.json()["mfa_required_for_current_user"] is False
+    assert allowed.status_code == 200
+    assert disable_blocked.status_code == 409
+    assert audit.status_code == 200
+    assert audit.json()[0]["details"]["mfa_policy"] == "all"
 
 
 def test_document_content_is_encrypted_in_database_and_file_storage(tmp_path: Path) -> None:

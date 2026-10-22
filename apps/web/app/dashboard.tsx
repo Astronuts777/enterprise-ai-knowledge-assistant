@@ -38,6 +38,7 @@ import {
   listSpaces,
   openBrowserSession,
   publishDocumentVersion,
+  regenerateMfaRecoveryCodes,
   registerAccount,
   revokeAccountSession,
   revokeMemberSessions,
@@ -52,6 +53,7 @@ import {
   startMfaSetup,
   uploadDocument,
   uploadDocumentVersion,
+  updateTenantSecurityPolicy,
   verifyEmail,
 } from "../lib/api";
 
@@ -84,6 +86,7 @@ const auditActionLabels: Record<string, string> = {
   "account.mfa_setup_started": "开始设置双重验证",
   "account.mfa_enabled": "启用双重验证",
   "account.mfa_disabled": "关闭双重验证",
+  "account.mfa_recovery_codes_regenerated": "重新生成 MFA 恢复码",
   "account.email_verified": "邮箱验证",
   "account.verification_requested": "请求验证邮件",
   "account.password_reset_requested": "请求密码重置",
@@ -91,6 +94,7 @@ const auditActionLabels: Record<string, string> = {
   "invitation.created": "创建企业邀请",
   "invitation.accepted": "接受企业邀请",
   "tenant.created": "创建企业",
+  "tenant.security_policy_updated": "更新企业安全策略",
   "membership.saved": "更新企业成员",
   "space.created": "创建知识空间",
   "space_access.saved": "更新空间权限",
@@ -157,6 +161,7 @@ export default function Dashboard() {
   const [actorId, setActorId] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
   const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaBlocked, setMfaBlocked] = useState(false);
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
@@ -178,18 +183,28 @@ export default function Dashboard() {
   const [uploadDialog, setUploadDialog] = useState(false);
   const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
   const [documentReader, setDocumentReader] = useState<DocumentContent | null>(null);
-  const [mfaDialog, setMfaDialog] = useState<"enable" | "confirm" | "recovery" | "disable" | null>(null);
+  const [mfaDialog, setMfaDialog] = useState<"enable" | "confirm" | "recovery" | "regenerate" | "disable" | null>(null);
   const [mfaSetup, setMfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadWorkspace = useCallback(async (userId: string, organizationId: string) => {
-    const [loadedTenant, loadedSpaces, loadedAnswers] = await Promise.all([
-      getTenant(userId, organizationId),
+    const loadedTenant = await getTenant(userId, organizationId);
+    setTenant(loadedTenant);
+    setMfaBlocked(loadedTenant.mfa_required_for_current_user);
+    if (loadedTenant.mfa_required_for_current_user) {
+      setSpaces([]);
+      setAnswers([]);
+      setDocumentsBySpace({});
+      setMembers([]);
+      setAuditEvents([]);
+      setCanManageMembers(false);
+      return;
+    }
+    const [loadedSpaces, loadedAnswers] = await Promise.all([
       listSpaces(userId, organizationId),
       listQuestionHistory(userId, organizationId),
     ]);
-    setTenant(loadedTenant);
     setSpaces(loadedSpaces);
     setAnswers(loadedAnswers);
     const documentEntries = await Promise.all(
@@ -313,6 +328,7 @@ export default function Dashboard() {
     setActorId("");
     setAccountEmail("");
     setMfaEnabled(false);
+    setMfaBlocked(false);
     setTenantId(null);
     setTenant(null);
     setSpaces([]);
@@ -321,6 +337,9 @@ export default function Dashboard() {
     setMembers([]);
     setAuditEvents([]);
     setAccountSessions([]);
+    setMfaDialog(null);
+    setMfaSetup(null);
+    setRecoveryCodes([]);
     setDocumentReader(null);
   }
 
@@ -623,8 +642,10 @@ export default function Dashboard() {
       const result = await confirmMfaSetup(String(form.get("code") ?? ""));
       setRecoveryCodes(result.recovery_codes);
       setMfaEnabled(true);
+      setMfaBlocked(false);
       setMfaDialog("recovery");
       setNotice("双重验证已启用");
+      if (tenantId) await loadWorkspace(actorId, tenantId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "验证码无效");
     } finally {
@@ -650,6 +671,41 @@ export default function Dashboard() {
       setNotice("双重验证已关闭，其他设备的会话已撤销");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法关闭双重验证");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRegenerateRecoveryCodes(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await regenerateMfaRecoveryCodes(
+        String(form.get("password") ?? ""),
+        String(form.get("code") ?? ""),
+      );
+      setRecoveryCodes(result.recovery_codes);
+      setMfaDialog("recovery");
+      setNotice("旧恢复码已失效，请保存新的恢复码");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法重新生成恢复码");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateSecurityPolicy(policy: Tenant["mfa_policy"]) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await updateTenantSecurityPolicy(actorId, tenantId, policy);
+      setTenant(updated);
+      setNotice("企业双重验证策略已更新");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法更新企业安全策略");
     } finally {
       setBusy(false);
     }
@@ -773,10 +829,13 @@ export default function Dashboard() {
 
         <div className="content">
           {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice(null)}>×</button></div>}
-          {view === "overview" && (
+          {mfaBlocked && view !== "settings" && (
+            <MfaPolicyGate onOpenSettings={openSettings} />
+          )}
+          {!mfaBlocked && view === "overview" && (
             <Overview tenant={tenant} spaces={spaces} members={members} answers={answers} documentsBySpace={documentsBySpace} onCreateSpace={() => setSpaceDialog(true)} onViewSpaces={() => setView("spaces")} onOpenSpace={openSpace} onOpenAssistant={() => setView("assistant")} />
           )}
-          {view === "assistant" && (
+          {!mfaBlocked && view === "assistant" && (
             <AssistantView
               answers={answers}
               spaces={spaces}
@@ -785,10 +844,10 @@ export default function Dashboard() {
               onAsk={handleAskQuestion}
             />
           )}
-          {view === "spaces" && (
+          {!mfaBlocked && view === "spaces" && (
             <SpacesView spaces={spaces} documentsBySpace={documentsBySpace} onCreate={() => setSpaceDialog(true)} onOpen={openSpace} />
           )}
-          {view === "documents" && activeSpace && (
+          {!mfaBlocked && view === "documents" && activeSpace && (
             <DocumentsView
               space={activeSpace}
               documents={documentsBySpace[activeSpace.id] ?? []}
@@ -802,10 +861,10 @@ export default function Dashboard() {
               onManageAccess={() => setSpaceAccessDialog(true)}
             />
           )}
-          {view === "members" && (
+          {!mfaBlocked && view === "members" && (
             <MembersView members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} />
           )}
-          {view === "audit" && actorMembership?.role === "enterprise_admin" && (
+          {!mfaBlocked && view === "audit" && actorMembership?.role === "enterprise_admin" && (
             <AuditView events={auditEvents} />
           )}
           {view === "settings" && ACCOUNT_MODE && (
@@ -813,8 +872,12 @@ export default function Dashboard() {
               sessions={accountSessions}
               busy={busy}
               mfaEnabled={mfaEnabled}
+              mfaPolicy={tenant.mfa_policy}
+              canManagePolicy={canManageMembers}
               onEnableMfa={() => setMfaDialog("enable")}
               onDisableMfa={() => setMfaDialog("disable")}
+              onRegenerateRecoveryCodes={() => setMfaDialog("regenerate")}
+              onUpdatePolicy={handleUpdateSecurityPolicy}
               onRevoke={handleRevokeSession}
               onRevokeOthers={handleRevokeOtherSessions}
             />
@@ -880,9 +943,16 @@ export default function Dashboard() {
           <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">验证并启用</button></div>
         </form>
       </Dialog>}
-      {mfaDialog === "recovery" && <Dialog title="保存恢复码" description="每个恢复码只能使用一次。请保存到企业密码管理器，关闭后不会再次显示。" onClose={() => setMfaDialog(null)}>
+      {mfaDialog === "recovery" && <Dialog title="保存恢复码" description="每个恢复码只能使用一次。请保存到企业密码管理器，关闭后不会再次显示。" onClose={() => { setMfaDialog(null); setRecoveryCodes([]); }}>
         <div className="recovery-code-grid">{recoveryCodes.map((code) => <code key={code}>{code}</code>)}</div>
         <div className="dialog-actions"><button className="primary-button" type="button" onClick={() => { setMfaDialog(null); setMfaSetup(null); setRecoveryCodes([]); }}>我已安全保存</button></div>
+      </Dialog>}
+      {mfaDialog === "regenerate" && <Dialog title="重新生成恢复码" description="验证后，全部旧恢复码会立即失效。新恢复码只显示一次。" onClose={() => setMfaDialog(null)}>
+        <form className="dialog-form" onSubmit={handleRegenerateRecoveryCodes}>
+          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          <label>验证码或现有恢复码<input name="code" autoComplete="one-time-code" minLength={6} maxLength={32} required /></label>
+          <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">生成新恢复码</button></div>
+        </form>
       </Dialog>}
       {mfaDialog === "disable" && <Dialog title="关闭双重验证" description="需要同时验证当前密码和身份验证器验证码（也可使用恢复码）。其他设备会被强制退出。" onClose={() => setMfaDialog(null)}>
         <form className="dialog-form" onSubmit={handleDisableMfa}>
@@ -1087,6 +1157,10 @@ function AccountAccessSetup({ email, busy, notice, onCreate, onAccept, onLogout 
   </main>;
 }
 
+function MfaPolicyGate({ onOpenSettings }: { onOpenSettings: () => Promise<void> }) {
+  return <section className="empty-state mfa-policy-gate"><span><Icon name="shield" /></span><p className="kicker">企业安全策略</p><h2>需要启用双重验证</h2><p>你的企业要求当前角色使用身份验证器双重验证。启用前，企业资料、知识空间和 AI 助手均不会向此账号开放。</p><button className="primary-button" onClick={onOpenSettings}>前往账号安全</button></section>;
+}
+
 function Overview({ tenant, spaces, members, answers, documentsBySpace, onCreateSpace, onViewSpaces, onOpenSpace, onOpenAssistant }: { tenant: Tenant; spaces: Space[]; members: Membership[]; answers: KnowledgeAnswer[]; documentsBySpace: Record<string, DocumentSummary[]>; onCreateSpace: () => void; onViewSpaces: () => void; onOpenSpace: (space: Space) => void; onOpenAssistant: () => void }) {
   const documents = Object.values(documentsBySpace).flat();
   const publishedCount = documents.filter((item) => item.latest_version.status === "published").length;
@@ -1173,14 +1247,16 @@ function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSession
   </>;
 }
 
-function AccountSecurityView({ sessions, busy, mfaEnabled, onEnableMfa, onDisableMfa, onRevoke, onRevokeOthers }: { sessions: AccountSession[]; busy: boolean; mfaEnabled: boolean; onEnableMfa: () => void; onDisableMfa: () => void; onRevoke: (session: AccountSession) => void; onRevokeOthers: () => void }) {
+function AccountSecurityView({ sessions, busy, mfaEnabled, mfaPolicy, canManagePolicy, onEnableMfa, onDisableMfa, onRegenerateRecoveryCodes, onUpdatePolicy, onRevoke, onRevokeOthers }: { sessions: AccountSession[]; busy: boolean; mfaEnabled: boolean; mfaPolicy: Tenant["mfa_policy"]; canManagePolicy: boolean; onEnableMfa: () => void; onDisableMfa: () => void; onRegenerateRecoveryCodes: () => void; onUpdatePolicy: (policy: Tenant["mfa_policy"]) => Promise<void>; onRevoke: (session: AccountSession) => void; onRevokeOthers: () => void }) {
   const otherSessionCount = sessions.filter((session) => !session.is_current).length;
+  const policyLabels: Record<Tenant["mfa_policy"], string> = { off: "不强制", admins: "企业与知识管理员", all: "全部企业成员" };
   return <>
     <div className="page-heading"><div><p className="kicker">账号安全</p><h1>身份与登录保护</h1><p>使用双重验证保护账号，并立即撤销不认识的设备。</p></div><button className="secondary-button" disabled={busy || otherSessionCount === 0} onClick={onRevokeOthers}><Icon name="shield" />退出全部其他设备</button></div>
     <section className={`mfa-card ${mfaEnabled ? "enabled" : ""}`}>
       <div><i><Icon name="shield" /></i><span><b>身份验证器双重验证</b><small>{mfaEnabled ? "已启用：登录需要密码和一次性验证码" : "建议启用：即使密码泄露也能阻止未授权登录"}</small></span></div>
-      <button className={mfaEnabled ? "secondary-button" : "primary-button"} disabled={busy} onClick={mfaEnabled ? onDisableMfa : onEnableMfa}>{mfaEnabled ? "关闭双重验证" : "立即启用"}</button>
+      <div className="mfa-actions">{mfaEnabled && <button className="secondary-button" disabled={busy} onClick={onRegenerateRecoveryCodes}>更新恢复码</button>}<button className={mfaEnabled ? "secondary-button" : "primary-button"} disabled={busy || (mfaEnabled && mfaPolicy !== "off")} onClick={mfaEnabled ? onDisableMfa : onEnableMfa}>{mfaEnabled ? (mfaPolicy !== "off" ? "企业策略要求保留" : "关闭双重验证") : "立即启用"}</button></div>
     </section>
+    <section className="security-policy-card"><div><p className="kicker">企业策略</p><h2>成员双重验证要求</h2><p>{canManagePolicy ? "策略在服务端每次访问企业资源时执行。启用强制策略前，你必须先启用自己的 MFA。" : `当前策略：${policyLabels[mfaPolicy]}`}</p></div>{canManagePolicy && <label>强制范围<select disabled={busy} value={mfaPolicy} onChange={(event) => void onUpdatePolicy(event.target.value as Tenant["mfa_policy"])}><option value="off">不强制</option><option disabled={!mfaEnabled} value="admins">企业与知识管理员</option><option disabled={!mfaEnabled} value="all">全部企业成员</option></select></label>}</section>
     <section className="security-summary"><div><Icon name="shield" /><span><b>{sessions.length}</b><small>有效会话</small></span></div><p>系统只保留粗粒度浏览器和操作系统标签，不保存完整 User-Agent 或原始 IP 地址。会话最多持续 12 小时。</p></section>
     <section className="session-list">
       {sessions.map((session) => <article key={session.id}><div className="session-device"><i><Icon name="settings" /></i><span><b>{session.client_label}</b><small>{session.is_current ? "当前设备" : `登录于 ${formatAuditDate(session.created_at)}`}</small></span></div><div className="session-expiry"><small>有效期至</small><time dateTime={session.expires_at}>{formatAuditDate(session.expires_at)}</time></div>{session.is_current ? <span className="current-session"><i />正在使用</span> : <button disabled={busy} onClick={() => onRevoke(session)}>退出此设备</button>}</article>)}

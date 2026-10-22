@@ -25,10 +25,17 @@ from enterprise_ai_api.database import Base
 
 class Tenant(Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint(
+            "mfa_policy IN ('off', 'admins', 'all')",
+            name="ck_tenants_mfa_policy",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(32), default="active")
+    mfa_policy: Mapped[str] = mapped_column(String(16), default="off")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

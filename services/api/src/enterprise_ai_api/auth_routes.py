@@ -53,13 +53,18 @@ from enterprise_ai_api.schemas import (
     MfaConfirmResponse,
     MfaDisableRequest,
     MfaLoginRequest,
+    MfaRecoveryCodesRequest,
     MfaSetupRequest,
     MfaSetupResponse,
     PasswordResetConfirm,
     RevokedSessionsResponse,
     TokenRequest,
 )
-from enterprise_ai_api.tenancy import CurrentUserId, authorize_tenant_action
+from enterprise_ai_api.tenancy import (
+    CurrentUserId,
+    authorize_tenant_action,
+    tenant_mfa_required,
+)
 from enterprise_ai_core.security import Action
 
 router = APIRouter(prefix="/v1")
@@ -591,6 +596,56 @@ def confirm_mfa_setup(
     return MfaConfirmResponse(recovery_codes=recovery_codes)
 
 
+@router.post("/auth/mfa/recovery-codes", response_model=MfaConfirmResponse)
+def regenerate_mfa_recovery_codes(
+    payload: MfaRecoveryCodesRequest,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> MfaConfirmResponse:
+    user = session.get(User, user_id)
+    if (
+        user is None
+        or user.password_hash is None
+        or user.mfa_enabled_at is None
+        or user.mfa_secret_ciphertext is None
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
+    if not password_matches(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    verified = _verify_user_mfa_code(session, user, payload.code)
+    if verified is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code",
+        )
+    method, counter, recovery_code = verified
+    if counter is not None:
+        user.mfa_last_counter = counter
+    if recovery_code is not None:
+        recovery_code.used_at = datetime.now(UTC)
+    session.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
+    recovery_codes = new_recovery_codes()
+    session.add_all(
+        [
+            MfaRecoveryCode(user_id=user.id, code_hash=_recovery_code_hash(code))
+            for code in recovery_codes
+        ]
+    )
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        record_audit_event(
+            session,
+            tenant_id=user.default_tenant_id,
+            actor_id=user.id,
+            action="account.mfa_recovery_codes_regenerated",
+            resource_type="user",
+            resource_id=user.id,
+            details={"method": method},
+        )
+    session.commit()
+    return MfaConfirmResponse(recovery_codes=recovery_codes)
+
+
 @router.delete("/auth/mfa", response_model=AccountResponse)
 def disable_mfa(
     payload: MfaDisableRequest,
@@ -608,6 +663,19 @@ def disable_mfa(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
     if not password_matches(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    if user.default_tenant_id is not None:
+        set_tenant_context(session, user.default_tenant_id)
+        tenant = session.get(Tenant, user.default_tenant_id)
+        membership = session.get(Membership, (user.default_tenant_id, user.id))
+        if (
+            tenant is not None
+            and membership is not None
+            and tenant_mfa_required(tenant, membership)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="MFA is required by the enterprise security policy",
+            )
     verified = _verify_user_mfa_code(session, user, payload.code)
     if verified is None:
         raise HTTPException(

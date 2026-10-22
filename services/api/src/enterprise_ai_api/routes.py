@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.database import get_session, set_tenant_context
-from enterprise_ai_api.models import Membership, Space, SpaceMembership, Tenant
+from enterprise_ai_api.models import Membership, Space, SpaceMembership, Tenant, User
 from enterprise_ai_api.schemas import (
     MembershipCreate,
     MembershipResponse,
@@ -20,6 +20,7 @@ from enterprise_ai_api.schemas import (
     SpaceResponse,
     TenantCreate,
     TenantResponse,
+    TenantSecurityPolicyUpdate,
 )
 from enterprise_ai_api.tenancy import (
     CurrentUserId,
@@ -27,6 +28,7 @@ from enterprise_ai_api.tenancy import (
     authorize_space_access,
     authorize_tenant_action,
     ensure_development_user,
+    tenant_mfa_required,
 )
 from enterprise_ai_core.security import Action
 
@@ -65,13 +67,75 @@ def create_tenant(
 
 
 @router.get("/tenants/{tenant_id}", response_model=TenantResponse)
-def get_tenant(tenant_id: UUID, user_id: CurrentUserId, session: DatabaseSession) -> Tenant:
-    return authorize_tenant_action(
+def get_tenant(
+    tenant_id: UUID,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> TenantResponse:
+    tenant = authorize_tenant_action(
         session,
         tenant_id=tenant_id,
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
+        enforce_mfa=False,
     )
+    membership = session.get(Membership, (tenant_id, user_id))
+    user = session.get(User, user_id)
+    required = (
+        membership is not None
+        and tenant_mfa_required(tenant, membership)
+        and (user is None or user.mfa_enabled_at is None)
+    )
+    return TenantResponse.model_validate(tenant).model_copy(
+        update={"mfa_required_for_current_user": required}
+    )
+
+
+@router.patch("/tenants/{tenant_id}/security-policy", response_model=TenantResponse)
+def update_tenant_security_policy(
+    tenant_id: UUID,
+    payload: TenantSecurityPolicyUpdate,
+    user_id: CurrentUserId,
+    session: DatabaseSession,
+) -> TenantResponse:
+    tenant = authorize_tenant_action(
+        session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=Action.MANAGE_MEMBERS,
+        enforce_mfa=False,
+    )
+    user = session.get(User, user_id)
+    membership = session.get(Membership, (tenant_id, user_id))
+    if (
+        membership is not None
+        and tenant_mfa_required(tenant, membership)
+        and (user is None or user.mfa_enabled_at is None)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MFA required by enterprise policy",
+        )
+    if payload.mfa_policy != "off" and (user is None or user.mfa_enabled_at is None):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Enable MFA before enforcing an enterprise MFA policy",
+        )
+    previous = tenant.mfa_policy
+    tenant.mfa_policy = payload.mfa_policy
+    record_audit_event(
+        session,
+        tenant_id=tenant_id,
+        actor_id=user_id,
+        action="tenant.security_policy_updated",
+        resource_type="tenant",
+        resource_id=tenant_id,
+        details={"previous_mfa_policy": previous, "mfa_policy": payload.mfa_policy},
+    )
+    session.commit()
+    set_tenant_context(session, tenant_id)
+    session.refresh(tenant)
+    return TenantResponse.model_validate(tenant)
 
 
 @router.post(

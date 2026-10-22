@@ -10,6 +10,7 @@ TenantRole = Literal["enterprise_admin", "knowledge_admin", "member"]
 SpaceRole = Literal["manager", "viewer"]
 Classification = Literal["internal", "confidential", "restricted"]
 DocumentStatus = Literal["ready", "published", "superseded", "failed"]
+MfaPolicy = Literal["off", "admins", "all"]
 
 
 class TenantCreate(BaseModel):
@@ -22,7 +23,13 @@ class TenantResponse(BaseModel):
     id: UUID
     name: str
     status: str
+    mfa_policy: MfaPolicy = "off"
+    mfa_required_for_current_user: bool = False
     created_at: datetime
+
+
+class TenantSecurityPolicyUpdate(BaseModel):
+    mfa_policy: MfaPolicy
 
 
 class MembershipCreate(BaseModel):
@@ -79,6 +86,11 @@ class MfaCodeRequest(BaseModel):
 
 class MfaConfirmResponse(BaseModel):
     recovery_codes: list[str]
+
+
+class MfaRecoveryCodesRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=6, max_length=32)
 
 
 class MfaLoginRequest(BaseModel):
