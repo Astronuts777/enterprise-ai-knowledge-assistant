@@ -263,6 +263,12 @@ class DocumentContentResponse(BaseModel):
     chunks: list[DocumentChunkResponse]
 
 
+class CitationSourceResponse(DocumentContentResponse):
+    answer_id: UUID
+    citation_number: int
+    cited_chunk_id: UUID
+
+
 class KnowledgeQuestionCreate(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
     space_ids: list[UUID] | None = Field(default=None, max_length=50)

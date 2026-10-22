@@ -107,7 +107,13 @@ export type DocumentContent = {
   document: KnowledgeDocument;
   version: DocumentVersion;
   chunks: DocumentChunk[];
+  cited_chunk_id?: string;
+  citation_number?: number;
 };
+
+export function getCitationSource(actorId: string, tenantId: string, answerId: string, citationNumber: number): Promise<DocumentContent> {
+  return request<DocumentContent>(`/v1/tenants/${tenantId}/questions/${answerId}/citations/${citationNumber}/source`, actorId);
+}
 
 export type AnswerStatus = "grounded" | "insufficient_evidence";
 

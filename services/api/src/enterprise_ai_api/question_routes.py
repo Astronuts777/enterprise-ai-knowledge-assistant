@@ -4,7 +4,7 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from enterprise_ai_api.models import (
 from enterprise_ai_api.retrieval import search_published_knowledge
 from enterprise_ai_api.schemas import (
     AnswerCitationResponse,
+    CitationSourceResponse,
     KnowledgeAnswerResponse,
     KnowledgeQuestionCreate,
     KnowledgeStatusResponse,
@@ -33,6 +34,7 @@ from enterprise_ai_api.schemas import (
 from enterprise_ai_api.tenancy import (
     CurrentUserId,
     accessible_space_ids,
+    authorize_space_access,
     authorize_tenant_action,
 )
 from enterprise_ai_core.security import Action
@@ -118,6 +120,72 @@ def _response(session: Session, answer: KnowledgeAnswer) -> KnowledgeAnswerRespo
         citations=[AnswerCitationResponse.model_validate(citation) for citation in citations],
         created_at=answer.created_at,
     )
+
+
+def _sources_visible(session: Session, answer_id: UUID, allowed_spaces: set[UUID]) -> bool:
+    sources = session.execute(
+        select(Document.space_id, DocumentVersion.status)
+        .select_from(AnswerCitation)
+        .outerjoin(Document, AnswerCitation.document_id == Document.id)
+        .outerjoin(DocumentVersion, AnswerCitation.document_version_id == DocumentVersion.id)
+        .where(AnswerCitation.answer_id == answer_id)
+    ).all()
+    return all(space in allowed_spaces and state == "published" for space, state in sources)
+
+
+@router.get(
+    "/tenants/{tenant_id}/questions/{answer_id}/citations/{citation_number}/source",
+    response_model=CitationSourceResponse,
+)
+def read_citation_source(
+    tenant_id: UUID, answer_id: UUID, citation_number: Annotated[int, Path(ge=1)],
+    user_id: CurrentUserId, session: DatabaseSession, response: Response,
+) -> CitationSourceResponse:
+    """Resolve an owned answer's immutable source IDs, never the latest draft."""
+    authorize_tenant_action(
+        session, tenant_id=tenant_id, user_id=user_id, action=Action.READ_KNOWLEDGE,
+    )
+    answer = session.get(KnowledgeAnswer, answer_id)
+    if answer is None or answer.tenant_id != tenant_id or answer.created_by != user_id:
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
+    allowed = set(accessible_space_ids(session, tenant_id=tenant_id, user_id=user_id))
+    if not _sources_visible(session, answer_id, allowed):
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
+    citation = session.scalar(select(AnswerCitation).where(
+        AnswerCitation.answer_id == answer_id, AnswerCitation.tenant_id == tenant_id,
+        AnswerCitation.citation_number == citation_number,
+    ))
+    if citation is None:
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
+    document = session.get(Document, citation.document_id)
+    version = session.get(DocumentVersion, citation.document_version_id)
+    chunk = session.get(DocumentChunk, citation.document_chunk_id)
+    if (
+        document is None or version is None or chunk is None
+        or document.tenant_id != tenant_id or version.tenant_id != tenant_id
+        or chunk.tenant_id != tenant_id or version.document_id != document.id
+        or chunk.document_version_id != version.id or version.status != "published"
+    ):
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
+    authorize_space_access(
+        session, tenant_id=tenant_id, user_id=user_id, space_id=document.space_id, manage=False,
+    )
+    chunks = list(session.scalars(select(DocumentChunk).where(
+        DocumentChunk.tenant_id == tenant_id, DocumentChunk.document_version_id == version.id,
+    ).order_by(DocumentChunk.position)))
+    result = CitationSourceResponse(
+        document=document, version=version, chunks=chunks, answer_id=answer_id,
+        citation_number=citation_number, cited_chunk_id=chunk.id,
+    )
+    record_audit_event(
+        session, tenant_id=tenant_id, actor_id=user_id, action="knowledge.citation_viewed",
+        resource_type="knowledge_answer", resource_id=answer_id,
+        details={"citation_number": citation_number, "document_id": str(document.id),
+                 "version_number": version.version_number, "chunk_id": str(chunk.id)},
+    )
+    session.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @router.post(
@@ -313,13 +381,6 @@ def list_question_history(
     for answer in answers:
         # Recheck every source, including publication state. Hiding just a citation
         # would still leak its excerpt through the saved answer text.
-        sources = session.execute(
-            select(Document.space_id, DocumentVersion.status)
-            .select_from(AnswerCitation)
-            .outerjoin(Document, AnswerCitation.document_id == Document.id)
-            .outerjoin(DocumentVersion, AnswerCitation.document_version_id == DocumentVersion.id)
-            .where(AnswerCitation.answer_id == answer.id)
-        ).all()
-        if all(space in allowed_space_ids and state == "published" for space, state in sources):
+        if _sources_visible(session, answer.id, allowed_space_ids):
             visible_answers.append(_response(session, answer))
     return visible_answers

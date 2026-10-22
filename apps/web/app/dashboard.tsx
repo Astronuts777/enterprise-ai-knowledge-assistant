@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -33,6 +33,7 @@ import {
   completeSsoLogin,
   changeDocumentJob,
   getDocumentContent,
+  getCitationSource,
   getDocumentDetail,
   getTenant,
   getKnowledgeStatus,
@@ -116,6 +117,7 @@ const auditActionLabels: Record<string, string> = {
   "document.published": "发布文档版本",
   "document.unpublished": "撤回文档发布",
   "document.viewed": "查看文档内容",
+  "knowledge.citation_viewed": "查看 AI 引用原文",
   "knowledge.question_answered": "知识问答",
   "authorization.denied": "访问被拒绝",
   "audit.exported": "导出审计日志",
@@ -624,6 +626,23 @@ export default function Dashboard() {
     }
   }
 
+  async function handleOpenCitation(answerId: string, citationNumber: number) {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    setDocumentReader(null);
+    try {
+      setDocumentReader(await getCitationSource(actorId, tenantId, answerId, citationNumber));
+    } catch (error) {
+      if (error instanceof ApiError && [403, 404].includes(error.status)) {
+        setAnswers((current) => current.filter((answer) => answer.id !== answerId));
+        setNotice("该引用已失效或你已无权访问，相关历史回答已隐藏。请重新提问获取当前依据。");
+      } else {
+        setNotice(error instanceof Error ? error.message : "无法打开引用原文，请稍后重试");
+      }
+    } finally { setBusy(false); }
+  }
+
   async function handleAskQuestion(question: string, spaceId?: string) {
     if (!tenantId) return;
     setBusy(true);
@@ -1001,6 +1020,7 @@ export default function Dashboard() {
               documentsBySpace={documentsBySpace}
               busy={busy}
               onAsk={handleAskQuestion}
+              onCitation={handleOpenCitation}
             />
           )}
           {!mfaBlocked && view === "spaces" && (
@@ -1369,7 +1389,7 @@ function Overview({ tenant, spaces, members, answers, documentsBySpace, onCreate
   </>;
 }
 
-function AssistantView({ actorId, tenantId, answers, spaces, documentsBySpace, busy, onAsk }: { actorId: string; tenantId: string; answers: KnowledgeAnswer[]; spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; busy: boolean; onAsk: (question: string, spaceId?: string) => Promise<void> }) {
+function AssistantView({ actorId, tenantId, answers, spaces, documentsBySpace, busy, onAsk, onCitation }: { actorId: string; tenantId: string; answers: KnowledgeAnswer[]; spaces: Space[]; documentsBySpace: Record<string, DocumentSummary[]>; busy: boolean; onAsk: (question: string, spaceId?: string) => Promise<void>; onCitation: (answerId: string, citationNumber: number) => void }) {
   const [question, setQuestion] = useState("");
   const [spaceId, setSpaceId] = useState("");
   const statusKey = `${actorId}:${tenantId}:${spaceId}:${answers.length}`;
@@ -1416,7 +1436,7 @@ function AssistantView({ actorId, tenantId, answers, spaces, documentsBySpace, b
           <div className="composer-actions"><small>{publishedCount ? `正在检索 ${publishedCount} 份已发布资料` : "尚无已发布资料，助手会明确提示依据不足"}</small><button className="primary-button" disabled={busy || question.trim().length < 2} type="submit">{busy ? "检索证据中…" : "获取可信回答"}<Icon name="send" /></button></div>
         </form>
 
-        {answers.length === 0 ? <section className="assistant-empty"><span><Icon name="assistant" /></span><h2>从一个具体问题开始</h2><p>问题越明确，原文定位越准确。只有已发布版本会进入检索范围。</p><div>{suggestions.map((suggestion) => <button key={suggestion} onClick={() => setQuestion(suggestion)} type="button">{suggestion}</button>)}</div></section> : <section className="answer-history" aria-label="问答历史">{answers.map((item) => <article className="answer-card" key={item.id}><div className="question-row"><span>你</span><div><small>{formatDate(item.created_at)}</small><h2>{item.question}</h2></div></div><div className="answer-row"><span><Icon name="assistant" /></span><div><div className="answer-meta"><b>{item.generator === "ollama" ? "本地 AI 综合回答" : item.generator === "openai" ? "AI 证据式回答" : "本地原文摘录"}</b><em className={item.status}>{item.status === "grounded" ? `${item.citations.length} 条引用` : "依据不足"}</em></div><p>{item.answer}</p>{item.citations.length > 0 && <div className="citations"><h3><Icon name="quote" />原文依据</h3>{item.citations.map((citation) => <blockquote key={citation.citation_number}><span>[{citation.citation_number}]</span><div><b>{citation.document_title}</b><small>v{citation.version_number} · {formatLocator(citation.locator)} · {citation.filename}</small><p>{citation.excerpt}</p></div></blockquote>)}</div>}</div></div></article>)}</section>}
+        {answers.length === 0 ? <section className="assistant-empty"><span><Icon name="assistant" /></span><h2>从一个具体问题开始</h2><p>问题越明确，原文定位越准确。只有已发布版本会进入检索范围。</p><div>{suggestions.map((suggestion) => <button key={suggestion} onClick={() => setQuestion(suggestion)} type="button">{suggestion}</button>)}</div></section> : <section className="answer-history" aria-label="问答历史">{answers.map((item) => <article className="answer-card" key={item.id}><div className="question-row"><span>你</span><div><small>{formatDate(item.created_at)}</small><h2>{item.question}</h2></div></div><div className="answer-row"><span><Icon name="assistant" /></span><div><div className="answer-meta"><b>{item.generator === "ollama" ? "本地 AI 综合回答" : item.generator === "openai" ? "AI 证据式回答" : "本地原文摘录"}</b><em className={item.status}>{item.status === "grounded" ? `${item.citations.length} 条引用` : "依据不足"}</em></div><p>{item.answer}</p>{item.citations.length > 0 && <div className="citations"><h3><Icon name="quote" />原文依据</h3>{item.citations.map((citation) => <blockquote key={citation.citation_number}><span>[{citation.citation_number}]</span><div><b>{citation.document_title}</b><small>v{citation.version_number} · {formatLocator(citation.locator)} · {citation.filename}</small><p>{citation.excerpt}</p><button className="citation-source-button" disabled={busy} onClick={() => onCitation(item.id, citation.citation_number)} aria-label={`查看引用 ${citation.citation_number} 的原文：${citation.document_title}`}>查看原文 →</button></div></blockquote>)}</div>}</div></div></article>)}</section>}
       </div>
       <aside className="assistant-guide"><p className="kicker">可信边界</p><h2>这个助手会做什么</h2><ul><li><Icon name="shield" /><div><b>只读已发布资料</b><span>草稿、失败版本和已替代版本不会参与回答。</span></div></li><li><Icon name="quote" /><div><b>保留原文位置</b><span>每条引用显示文件、版本、页码或段落。</span></div></li><li><Icon name="assistant" /><div><b>没有证据就拒答</b><span>外部模型即使已配置，也只能使用本次获准访问的证据。</span></div></li></ul></aside>
     </section>
@@ -1463,8 +1483,15 @@ function DocumentVersions({ detail, busy, onClose, onPreview, onChange }: { deta
 }
 
 function DocumentReader({ content, onClose }: { content: DocumentContent; onClose: () => void }) {
+  const citedElement = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (content.cited_chunk_id && citedElement.current) {
+      citedElement.current.focus({ preventScroll: true });
+      citedElement.current.scrollIntoView({ block: "center" });
+    }
+  }, [content]);
   const statusLabel = content.version.status === "published" ? "已发布版本" : content.version.status === "ready" ? "待发布预览" : content.version.status === "superseded" ? "已替代版本" : "解析失败";
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section aria-modal="true" className="dialog document-reader" role="dialog"><button aria-label="关闭文档" className="dialog-close" onClick={onClose}>×</button><p className="kicker">安全文档阅读器</p><h2>{content.document.title}</h2><div className="reader-meta"><span>{content.version.filename}</span><span>v{content.version.version_number}</span><span>{statusLabel}</span><span>{formatBytes(content.version.byte_size)}</span></div><div className="reader-content">{content.chunks.length === 0 ? <div className="reader-empty"><Icon name="file" /><p>这个版本没有可显示的解析内容。</p></div> : content.chunks.map((chunk) => <article key={chunk.id}><small>{formatLocator(chunk.locator)}</small><p>{chunk.text}</p></article>)}</div><footer><Icon name="shield" />内容已通过企业、空间和版本权限校验；本次查看已写入审计日志。</footer></section></div>;
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section aria-modal="true" className="dialog document-reader" role="dialog"><button aria-label="关闭文档" className="dialog-close" onClick={onClose}>×</button><p className="kicker">安全文档阅读器</p><h2>{content.document.title}</h2><div className="reader-meta"><span>{content.version.filename}</span><span>v{content.version.version_number}</span><span>{statusLabel}</span>{content.cited_chunk_id && <span>已定位引用 [{content.citation_number}]，高亮段落为原文依据</span>}<span>{formatBytes(content.version.byte_size)}</span></div><div className="reader-content">{content.chunks.length === 0 ? <div className="reader-empty"><Icon name="file" /><p>这个版本没有可显示的解析内容。</p></div> : content.chunks.map((chunk) => <article key={chunk.id} ref={chunk.id === content.cited_chunk_id ? citedElement : undefined} tabIndex={chunk.id === content.cited_chunk_id ? -1 : undefined} className={chunk.id === content.cited_chunk_id ? "cited-chunk" : undefined}><small>{chunk.id === content.cited_chunk_id && "引用原文 · "}{formatLocator(chunk.locator)}</small><p>{chunk.text}</p></article>)}</div><footer><Icon name="shield" />内容已通过企业、空间和版本权限校验；本次查看已写入审计日志。</footer></section></div>;
 }
 
 function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSessions, onStatusChange }: { members: Membership[]; actorId: string; busy: boolean; canManage: boolean; onAdd: () => void; onRevokeSessions: (userId: string) => void; onStatusChange: (member: Membership) => void }) {
