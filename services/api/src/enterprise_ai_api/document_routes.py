@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from enterprise_ai_api.ai_providers import AIProviderError, EmbeddingProvider
 from enterprise_ai_api.audit import record_audit_event
@@ -24,7 +25,8 @@ from enterprise_ai_api.document_processing import (
     safe_filename,
     validate_extension,
 )
-from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
+from enterprise_ai_api.file_scanning import FileScanUnavailable, UnsafeFile
+from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, IngestionJob, Space
 from enterprise_ai_api.object_storage import ObjectStorage, ObjectStorageError
 from enterprise_ai_api.schemas import (
     DocumentChunkResponse,
@@ -133,6 +135,41 @@ async def _read_upload(file: UploadFile) -> tuple[str, str, bytes]:
     return filename, extension, content
 
 
+async def _scan_upload(
+    request: Request,
+    session: Session,
+    tenant_id: UUID,
+    user_id: UUID,
+    space_id: UUID,
+    content: bytes,
+) -> str:
+    if request.app.state.async_ingestion:
+        return "pending"
+    scanner = request.app.state.file_scanner
+    try:
+        await run_in_threadpool(scanner.scan, content)
+    except (UnsafeFile, FileScanUnavailable) as error:
+        unsafe = isinstance(error, UnsafeFile)
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            action="document.upload_blocked",
+            resource_type="space",
+            resource_id=space_id,
+            outcome="denied",
+            details={"reason": "unsafe_file" if unsafe else "scanner_unavailable"},
+        )
+        session.commit()
+        raise HTTPException(
+            status_code=422 if unsafe else 503,
+            detail="文件安全扫描发现风险，上传已拒绝。"
+            if unsafe
+            else "文件安全扫描暂不可用，上传已阻止，请稍后重试。",
+        ) from error
+    return "clean" if scanner.name != "disabled" else "not_scanned"
+
+
 def _add_version(
     session: Session,
     *,
@@ -147,6 +184,7 @@ def _add_version(
     audit_action: str,
     embedding_provider: EmbeddingProvider,
     allow_external_ai: bool,
+    scan_status: str,
 ) -> DocumentVersion:
     content_hash = content_fingerprint(content)
     duplicate = session.scalar(
@@ -182,8 +220,8 @@ def _add_version(
         ) from error
 
     try:
-        parsed_chunks = parse_document(content, extension)
-        version_status = "ready"
+        parsed_chunks = [] if scan_status == "pending" else parse_document(content, extension)
+        version_status = "queued" if scan_status == "pending" else "ready"
         error_message = None
     except DocumentProcessingError as error:
         parsed_chunks = []
@@ -200,9 +238,7 @@ def _add_version(
                 embeddings = []
                 for start in range(0, len(parsed_chunks), 64):
                     batch = parsed_chunks[start : start + 64]
-                    embeddings.extend(
-                        embedding_provider.embed([chunk.text for chunk in batch])
-                    )
+                    embeddings.extend(embedding_provider.embed([chunk.text for chunk in batch]))
                 if len(embeddings) != len(parsed_chunks):
                     raise AIProviderError("Embedding provider returned incomplete results")
                 embedding_status = "indexed"
@@ -231,6 +267,10 @@ def _add_version(
     )
     session.add(version)
     session.flush()
+    if version_status == "queued":
+        session.add(
+            IngestionJob(tenant_id=tenant_id, version_id=version_id, available_at=datetime.now(UTC))
+        )
     for position, chunk in enumerate(parsed_chunks, start=1):
         vector = embeddings[position - 1] if embeddings is not None else None
         session.add(
@@ -262,6 +302,7 @@ def _add_version(
             "status": version_status,
             "embedding_status": embedding_status,
             "embedding_provider": embedding_provider.name,
+            "file_scan_status": scan_status,
         },
     )
 
@@ -307,6 +348,7 @@ async def upload_document(
         manage=True,
     )
     filename, extension, content = await _read_upload(file)
+    scan_status = await _scan_upload(request, session, tenant_id, user_id, space_id, content)
     document_title = (title or Path(filename).stem).strip()
     if not document_title:
         raise HTTPException(
@@ -343,6 +385,7 @@ async def upload_document(
         audit_action="document.created",
         embedding_provider=embedding_provider,
         allow_external_ai=allow_external_ai,
+        scan_status=scan_status,
     )
     return DocumentUploadResponse(document=document, version=version)
 
@@ -368,10 +411,11 @@ async def upload_document_version(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    document = _document_or_404(
-        session, tenant_id, user_id, document_id, manage=True
-    )
+    document = _document_or_404(session, tenant_id, user_id, document_id, manage=True)
     filename, extension, content = await _read_upload(file)
+    scan_status = await _scan_upload(
+        request, session, tenant_id, user_id, document.space_id, content
+    )
     space = session.get(Space, document.space_id)
     allow_external_ai = bool(
         space is not None
@@ -393,6 +437,7 @@ async def upload_document_version(
         audit_action="document.version_uploaded",
         embedding_provider=embedding_provider,
         allow_external_ai=allow_external_ai,
+        scan_status=scan_status,
     )
 
 
@@ -436,9 +481,7 @@ def list_documents(
             DocumentVersion.document_id == document.id
         )
         if not can_manage:
-            version_statement = version_statement.where(
-                DocumentVersion.status == "published"
-            )
+            version_statement = version_statement.where(DocumentVersion.status == "published")
         latest = session.scalar(
             version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
         )
@@ -465,22 +508,16 @@ def read_document_content(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    document = _document_or_404(
-        session, tenant_id, user_id, document_id, manage=False
-    )
+    document = _document_or_404(session, tenant_id, user_id, document_id, manage=False)
     can_manage = can_manage_space(
         session,
         tenant_id=tenant_id,
         user_id=user_id,
         space_id=document.space_id,
     )
-    version_statement = select(DocumentVersion).where(
-        DocumentVersion.document_id == document.id
-    )
+    version_statement = select(DocumentVersion).where(DocumentVersion.document_id == document.id)
     if not can_manage:
-        version_statement = version_statement.where(
-            DocumentVersion.status == "published"
-        )
+        version_statement = version_statement.where(DocumentVersion.status == "published")
     version = session.scalar(
         version_statement.order_by(DocumentVersion.version_number.desc()).limit(1)
     )
@@ -532,26 +569,18 @@ def get_document(
         user_id=user_id,
         action=Action.READ_KNOWLEDGE,
     )
-    document = _document_or_404(
-        session, tenant_id, user_id, document_id, manage=False
-    )
+    document = _document_or_404(session, tenant_id, user_id, document_id, manage=False)
     can_manage = can_manage_space(
         session,
         tenant_id=tenant_id,
         user_id=user_id,
         space_id=document.space_id,
     )
-    version_statement = select(DocumentVersion).where(
-        DocumentVersion.document_id == document.id
-    )
+    version_statement = select(DocumentVersion).where(DocumentVersion.document_id == document.id)
     if not can_manage:
-        version_statement = version_statement.where(
-            DocumentVersion.status == "published"
-        )
+        version_statement = version_statement.where(DocumentVersion.status == "published")
     versions = list(
-        session.scalars(
-            version_statement.order_by(DocumentVersion.version_number.desc())
-        )
+        session.scalars(version_statement.order_by(DocumentVersion.version_number.desc()))
     )
     return DocumentDetail(document=document, versions=versions)
 
@@ -572,9 +601,7 @@ def preview_document_chunks(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    _version_or_404(
-        session, tenant_id, user_id, version_id, manage=True
-    )
+    _version_or_404(session, tenant_id, user_id, version_id, manage=True)
     return list(
         session.scalars(
             select(DocumentChunk)
@@ -600,13 +627,11 @@ def publish_document_version(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    version = _version_or_404(
-        session, tenant_id, user_id, version_id, manage=True
-    )
-    if version.status == "failed":
+    version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
+    if version.status in {"failed", "queued", "processing"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A failed document version cannot be published",
+            detail="Only successfully processed document versions can be published",
         )
 
     published_versions = session.scalars(
@@ -658,9 +683,7 @@ def rebuild_document_semantic_index(
         user_id=user_id,
         action=Action.MANAGE_DOCUMENTS,
     )
-    version = _version_or_404(
-        session, tenant_id, user_id, version_id, manage=True
-    )
+    version = _version_or_404(session, tenant_id, user_id, version_id, manage=True)
     if not embedding_provider.enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

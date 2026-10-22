@@ -7,7 +7,11 @@
 - **API 文档（本地）**：[http://localhost:8000/docs](http://localhost:8000/docs)
 - **Web（本地）**：[http://localhost:3000](http://localhost:3000)
 
-> 公开地址是免费演示环境，不是正式生产系统。请勿上传真实机密资料。
+> **当前推荐：用户在自己的电脑上运行完整本地版。** 不需要购买云服务器、对象存储或模型 API，
+> 也不需要配置付费 API 密钥。首次安装需联网下载依赖和模型，运行消耗自己的硬件、电力和磁盘空间。
+> 请从下面的[本地 AI 配置指南](#local-ai-setup)开始；普通使用无需启动 Docker 或创建 Render 资源。
+>
+> 公开地址仅作免费演示，不是正式生产系统，也不会调用访问者电脑里的模型。请勿上传真实机密资料。
 
 ## 这个 Web 可以做什么
 
@@ -28,6 +32,9 @@
 13. 由企业管理员查看身份、权限、文档阅读和问答操作的追加式审计日志，并导出防公式注入的合规 CSV 快照。
 14. 在“账号安全”中启用身份验证器双重验证、更新一次性恢复码，并查看或撤销登录设备。
 15. 由企业管理员强制要求管理员或全部成员启用 MFA；未满足策略的账号不能读取企业资料。
+16. 企业管理员可在成员页停用/恢复成员；停用后旧会话也无法读取该企业资料，不影响其他企业权限。
+17. 可选接入本机 ClamAV，在上传原件、解析和建索引之前扫描；启用后扫描服务故障也会阻止上传。
+18. 本地版可用独立密钥加密备份数据库、原件和应用主密钥，并验证后恢复到新目录。
 
 适合用来验证以下场景：
 
@@ -40,12 +47,12 @@
 ### 当前能力边界
 
 - 默认问答使用透明、可重复的本地关键词检索和原文摘录，不向外部模型发送资料；管理员可选配置语义嵌入和生成模型。
-- 文档解析在 API 请求内同步完成；Worker 当前只有可测试的任务边界，尚未处理异步任务。
+- 已实现持久化异步 Worker：加密隔离上传、扫描/解析/OCR/索引、租约接管、有限重试、取消及状态刷新。通用环境默认同步；本地 `start` 使用异步模式。
 - 公网账号模式使用服务端会话和 HttpOnly Cookie；本地默认仍可用 `X-Dev-User-Id` 快速调试。
 - 邮箱验证、邀请邮件和密码重置已经接入 SMTP 适配器；公开演示环境尚未配置邮件服务，因此暂不强制邮箱验证，邀请仍会返回可手动发送的链接。
-- 登录按账号和网络来源进行数据库级限流；支持 TOTP 身份验证器双重验证、一次性恢复码、恢复码轮换、验证码防重放和限时 MFA 挑战；企业可对管理员或全员强制执行 MFA。用户可查看并撤销登录设备，企业管理员可强制成员下线。企业 SSO 和异常检测尚未接入。
+- 登录按账号和网络来源进行数据库级限流；支持 TOTP 双重验证、恢复码、会话撤销与企业 MFA 策略。可选 OIDC SSO 与 SCIM 用户/组同步已实现，默认关闭；真实企业身份平台尚需配置和联调，异常检测尚未接入。
 - 当前语义检索在授权后的加密向量候选集中由应用计算，适合现阶段规模；数据库内 pgvector 检索仍在路线图中。
-- PDF 支持本地中英文 OCR，DOCX 表格保留表头与行定位；OCR 仍可能误识别数字、复杂表格和低清扫描件，必须在发布前核对解析结果。SCIM、云盘连接器、决策证据包、审批和不可变审计归档仍在路线图中。
+- PDF 支持本地中英文 OCR，DOCX 表格保留表头与行定位；OCR 仍可能误识别数字、复杂表格和低清扫描件，必须在发布前核对解析结果。云盘连接器、决策证据包、审批和不可变审计归档仍在路线图中。
 - Render 免费环境的数据库和文件存储不适合作为正式企业数据基础设施。
 
 ## 产品原则
@@ -70,7 +77,9 @@ flowchart LR
     R --> D
     R -. 可选 .-> M[模型适配器]
     R --> C[回答与不可变引用]
-    K[Worker 边界] -. 后续异步解析 .-> A
+    A --> Q[(持久文件任务)]
+    Q --> K[Worker: 扫描/解析/索引]
+    K --> D
 ```
 
 当前部署把静态导出的 Next.js Web 和 FastAPI 放在同一个 Docker 服务中，对外只暴露一个
@@ -94,7 +103,7 @@ HTTPS 地址。生产目标架构会将 Web、API、Worker、PostgreSQL、对象
 ```text
 apps/web/                         Next.js 企业知识工作台
 services/api/                     FastAPI、权限、文档和问答接口
-services/worker/                  后续异步解析与索引 Worker 边界
+services/worker/                  持久异步文件处理 Worker
 packages/core/                    共享权限与领域逻辑
 migrations/                       Alembic 数据库迁移
 infra/                            本地 PostgreSQL 与 MinIO
@@ -199,7 +208,39 @@ NEXT_PUBLIC_APP_MODE=accounts pnpm dev:web
 
 同一个本地数据库必须持续使用同一密钥；密钥变化后，之前加密的数据将无法解密。
 
+<a id="local-ai-setup"></a>
+
 #### 本地 AI 完整运行（Ollama，不发送资料给外部模型）
+
+**适用方式：每位用户在自己的电脑上启动网页、API、数据库、文件存储和模型。**
+浏览器访问的是自己的 `http://127.0.0.1:8201`，不是 Render 公网地址。
+这条路径不使用付费云资源；后文的云部署、S3 和外部模型说明只是可选技术参考，不是安装前提。
+
+##### 第一步：准备电脑和代码
+
+- macOS 或 Linux：使用系统终端，执行下方 Bash 命令。
+- Windows：当前启动器使用 Unix 路径；请在 **WSL2 的 Ubuntu 环境**内安装 Python、Node.js、pnpm、
+  Ollama，并把仓库克隆到 WSL 的 Linux 主目录。所有命令都在 WSL 终端执行，不要混用 Windows
+  原生 Python/Ollama 或直接把 `.venv/bin/...` 粘贴到 PowerShell。Windows/WSL 全流程尚未实机验证。
+- Python 3.12–3.14、Node.js 22、pnpm 11.25.0、Git；安装方法见上方“准备环境”。
+- 建议至少 16 GB 内存、预留 15 GB 空闲磁盘作为试用起点；文档和备份会额外占空间。
+  这不是性能保证：CPU 可以运行但可能较慢，大文件、长问题和同时提问会增加资源需求。
+- 不需要 Docker、SMTP 邮箱服务、云存储账号或外部模型 API 密钥。
+
+首次安装（已在本机完成的步骤不必重复）：
+
+```bash
+git clone https://github.com/Astronuts777/enterprise-ai-knowledge-assistant.git
+cd enterprise-ai-knowledge-assistant
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.lock
+pnpm install --frozen-lockfile
+```
+
+后续所有终端都先进入这个仓库目录。不要复制别人的 `.venv`、`node_modules`、账号数据库或密钥来代替安装。
+
+##### 第二步：启动并下载本地模型
 
 这里的 `AI_PROVIDER=local` 指**关键词检索＋原文摘录**，不是本地大模型。
 真正的本地模型模式是 `AI_PROVIDER=ollama` 和 `EMBEDDING_PROVIDER=ollama`。
@@ -219,14 +260,25 @@ NEXT_PUBLIC_APP_MODE=accounts pnpm dev:web
 
    如果运行环境无法访问 GPU，改用 `.venv/bin/python scripts/local_ai.py model --cpu`。
    启动器设置 `OLLAMA_NO_CLOUD=1`、仅监听 `127.0.0.1`，模型保存在 `work/ollama-models/`。
-   首次使用下载两个模型（仅需要一次，合计约 3.7 GB）：
+   保持终端一运行，**另开终端二**下载两个模型（首次需要，合计约 3.7 GB，随模型版本可能变化）：
 
    ```bash
    curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen3:4b"}'
    curl http://127.0.0.1:11435/api/pull -d '{"model":"bge-m3"}'
    ```
 
-3. 构建同源账号版网页，然后终端二启动 Web＋API：
+   等待两个下载都显示 `"status":"success"`，再检查服务中的模型列表：
+
+   ```bash
+   curl --fail http://127.0.0.1:11435/api/tags
+   ```
+
+   结果应同时包含 `qwen3:4b` 和 `bge-m3`。本启动器使用 **11435**，不能只在默认 11434 服务下载模型；
+   也不要把模型名改成云端模型。下载失败时先解决网络或磁盘问题，不要先上传企业资料。
+
+##### 第三步：启动完整网页
+
+3. 在终端二构建同源账号版网页，然后启动 Web＋API：
 
    ```bash
    pnpm build:local-ai
@@ -237,14 +289,98 @@ NEXT_PUBLIC_APP_MODE=accounts pnpm dev:web
    核对正文并发布，再进入 AI 决策助手提问。PyCharm 也可分别运行
    **AI: Local Ollama** 和 **Web: Local AI**；同一服务不要重复启动。
 
+本地启动器会自动创建并迁移 SQLite 数据库、生成加密密钥，开启邮箱＋密码账号模式；
+本地配置不要求验证邮件，也不会发送邮件。没有通用的预设账号，请自己注册。
+无需另外启动 `pnpm dev:web` 或 8000 端口的开发 API，也无需手工填写 `.env`；
+这个启动器明确设置本地所需环境变量，而不是自动读取 `.env`。
+
+先用一份不含机密信息的小型 TXT/Markdown 验证：上传 → 核对解析正文 → 发布 → 提问 → 打开引用核对。
+如果模型服务未运行或下载未完成，请先处理错误，不要将“已有索引”当成模型在线的证明。
+
+##### 日常使用：一条命令启动，诊断问题
+
+首次依赖安装、模型下载和网页构建完成后，先用 `Ctrl+C` 停止上面手工启动的两个服务。
+以后每天只需在仓库根目录运行：
+
+```bash
+.venv/bin/python scripts/local_ai.py start
+```
+
+它会检查 Python 依赖、网页构建、Ollama、数据密钥与端口，依次启动模型、Web＋API 和 Worker，
+确认模型文件齐全及数据库就绪后打印网页地址。保持这个终端运行；按 `Ctrl+C` 一起停止本次启动的服务。
+若一个服务启动失败或运行中退出，启动器会停止本次启动的其他服务，资料仍然保留。
+**这不是自动安装器**：不会自动安装依赖、下载模型、购买资源或调用付费 API。
+
+- GPU 不可用：`start --cpu`。
+- 自定义端口：`start --port 8202 --model-port 11436`，启动器会统一配置模型、Web/API 和 Worker。
+- 端口已占用时会停止启动并提示，不会接管或关闭已有进程；先停止自己旧的手工服务，或改用空闲端口。
+
+只检查环境、不更改数据：
+
+```bash
+.venv/bin/python scripts/local_ai.py doctor
+```
+
+`doctor` 会输出中文检查结果，检查依赖、模型文件、密钥和可选的中英文 OCR 工具。
+模型列表检查需要对应模型服务已经运行；尚未运行时提示“未就绪”是正常的，按提示单独启动 `model` 再检查。
+自定义端口时加 `doctor --model-port 11436`。OCR 缺失只会警告，不妨碍纯文本使用。
+检查通过不等于已验证模型推理质量或并发性能，仍需用测试资料完成一次上传和问答。
+
+需要分别调试时，仍可使用原来的两个终端方式；不要与 `start` 重复运行：
+
+```bash
+# 终端一：保持运行
+.venv/bin/python scripts/local_ai.py model
+
+# 终端二：保持运行
+.venv/bin/python scripts/local_ai.py web
+```
+
+停止时在对应终端按 `Ctrl+C`。电脑休眠、关机或服务停止后网页/AI 不可用；重新启动后仍使用原来的账号和资料。
+代码升级前先按下文备份；升级依赖后重新运行 `pnpm build:local-ai`，再启动服务。
+
+##### 第四步：了解文件保存位置与备份
+
+| 仓库内路径 | 内容 | 是否需要备份 |
+| --- | --- | --- |
+| `data/local/ollama/enterprise.db` | 账号、权限、文档记录、解析正文、向量和问答记录 | 是 |
+| `data/local/ollama/uploads/` | 加密上传原件 | 是，不能只备份数据库 |
+| `data/local/ollama/master.key` | 解密所需主密钥 | 是，必须安全保存 |
+| `work/ollama-models/` | 下载的模型 | 可选，丢失后可重新下载 |
+
 本地 AI 使用独立的 `data/local/ollama/enterprise.db` 和 `uploads/`，不会自动导入线上账号或资料。
 密钥自动保存到 `data/local/ollama/master.key`（权限 0600），不要删除、公开或提交 Git。
 加密涵盖敏感字段、向量和上传文件，不是整个 SQLite 文件的透明加密；应同时启用磁盘加密、访问控制并保管密钥备份。
 OCR 使用短暂的私有明文临时文件，处理后自动清理；它们仍受本机磁盘安全保护的约束。
-电脑休眠或停止服务后，本地网页/AI 不再可用。
+这些文件位于本机普通磁盘目录，不是 Render 临时磁盘，重启服务或电脑不会主动清空它们。
+但删除项目目录、清理 `data/local/`、硬盘损坏或丢失密钥仍会导致数据丢失或无法解密。
+
+本地备份步骤：
+
+1. 停止 Web＋API，确保没有上传或数据库写入。
+2. 用文件管理器完整复制 `data/local/ollama/` 到自己已有的加密备份介质，保留数据库可能伴随的文件。
+3. 该目录包含主密钥，备份也必须受加密和访问控制保护；不要上传公共网盘、发给他人或提交到 GitHub。
+   主密钥另外保存一份受保护的离线副本，不要只留在同一块硬盘上。
+4. 恢复时先停止服务，保留现有目录的安全副本，再恢复同一时间点的完整目录及其原密钥。
+   启动后检查登录、文档和问答；不要为旧数据库生成新密钥。
+
+本地目录已被 Git 忽略，**推送代码到 GitHub 不等于备份资料**。
+除了手工复制，现在也提供会校验原件、数据库和密钥的[本地加密备份与隔离恢复命令](docs/09-closed-pilot-readiness.md)。
+目前未安排定时任务，仍需自行定期执行；备份密钥不能与备份一起公开。
+
+##### 可选：让扫描 PDF 可以读取（本地 OCR）
 
 扫描 PDF 额外需要 Poppler、Tesseract 和 `eng`、`chi_sim` 语言包。
 macOS 可在自己的终端运行 `brew install poppler tesseract tesseract-lang`。
+Ubuntu / WSL Ubuntu 可运行：
+
+```bash
+sudo apt-get update
+sudo apt-get install poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
+```
+
+安装后用 `pdftoppm -v`、`tesseract --list-langs` 检查，语言列表应包含 `eng` 和 `chi_sim`，
+然后重新启动 Web＋API。TXT、Markdown 和 DOCX 不需要这套 OCR 依赖。
 本项目这台机器也支持已安装在 `work/ocr/` 的独立 OCR 环境，启动器会自动加入路径。
 Docker 镜像已声明对应系统依赖。PDF 最多 100 页，其中需要 OCR 的图片页面最多 10 页，
 OCR 总时间预算 90 秒；当前采取保守策略，含图片的页面会做 OCR，包含图片的封面也可能需要人工处理。
@@ -259,9 +395,30 @@ OCR 总时间预算 90 秒；当前采取保守策略，含图片的页面会做
 - 当前候选检索最多处理授权范围内最近 5,000 个片段，并取有限相关片段及相邻正文；不能保证对整库做穷尽总结。
 - 本地问答关闭自动截断和上下文滑动；超过模型上下文限制时返回错误，请缩小问题/空间范围，不会悄悄丢掉证据后继续回答。
 
-本地模型服务不会自动接到 Render 公网网站，Render 的 `127.0.0.1` 不是你的 Mac。
+##### 不同电脑如何使用？
+
+- 每个人按本指南安装后，访问自己电脑的 `http://127.0.0.1:8201` 即可使用；不依赖项目作者的电脑开机。
+- **不同电脑是独立实例，账号、企业、文件和问答不会自动共享。** 输入同一个企业名或邮箱也不会连接到同一份数据库。
+- 这不是“打开公共链接就使用本机模型”的实现；只安装 Ollama、仍访问 Render 网站，不会启用本机 AI。
+- 如果之后需要全公司共享同一知识库，可以另行评估使用企业已有、持续在线的内网电脑统一运行整套系统。
+  当前启动器仅监听回环地址，尚未提供安全的局域网共享配置；不能直接把监听地址改为 `0.0.0.0` 就当作正式部署。
+
+本地模型服务不会自动接到 Render 公网网站，Render 的 `127.0.0.1` 不是你的电脑。
 不要暴露 Ollama 端口，也不要把公网配置直接改成你电脑的回环地址。
-企业正式上线需要在受控服务器部署模型和应用，并另行规划私网、安全边界、并发、备份及运维。
+共享部署仍需规划 HTTPS、网络访问控制、权限隔离、备份和运维，不在当前个人本地配置范围内。
+
+##### 本地启动常见问题
+
+| 现象 | 检查方式 |
+| --- | --- |
+| 找不到 `pnpm`、`python3` 或 `ollama` | 先安装对应工具、重新打开终端，确认命令在当前环境的 PATH 中；WSL 内需要独立安装 |
+| 提示 `Build first` | 在仓库根目录运行 `pnpm build:local-ai`，构建成功后再启动 `web` |
+| `8201` 网页打不开 | 确认终端二仍在运行、无报错；访问本机 `http://127.0.0.1:8201`，不是 `/docs` 或 Render 地址 |
+| 模型连接失败或找不到模型 | 检查终端一和 `curl --fail http://127.0.0.1:11435/api/tags`，确认两个模型下载在 11435 服务中 |
+| 端口已占用 | 不要重复启动；确认已有进程归属后停止自己的旧进程，或同时为 `model` 与 `web` 指定相同的 `--model-port`；网页端口可用 `web --port 8202` |
+| GPU 不可用 | 停止自己的模型服务后改用 `model --cpu`；CPU 较慢，不保证长问题在超时前完成 |
+| 已上传但无法找到内容 | 检查解析正文是否完整、版本是否发布、账号是否有权限，以及“语义检索索引管理”中是否建立索引 |
+| 原来的账号或文件不见了 | 确认使用原仓库与 `data/local/ollama/`，不是新克隆的目录、普通开发版或 Render 网站；不要删除密钥重试 |
 
 可复现验证（只使用合成测试资料）：
 
@@ -283,8 +440,9 @@ PATH="$PWD/work/ocr/bin:$PATH" TESSDATA_PREFIX="$PWD/work/ocr/share/tessdata" \
 3. 在运行配置中选择 **Local: Web + API**。
 4. 点击运行后访问 `http://localhost:3000`。
 
-也可以分别运行 **API: FastAPI** 和 **Web: Dev**。`Worker` 输出 `No jobs available` 后正常退出，
-代表当前没有异步任务，不是网站启动失败。
+也可以分别运行 **API: FastAPI** 和 **Web: Dev**。新 Worker 是持续运行的后台服务，不提供网页。
+最简单的本地完整启动方式是 `.venv/bin/python scripts/local_ai.py start`，它同时启动模型、Web/API 和 Worker。
+升级、单独运行 Worker 及 SSO/SCIM 配置详见[后台处理与企业身份接入](docs/10-worker-sso-scim.md)。
 
 ### 6. 完成一次本地业务验证
 
@@ -415,6 +573,10 @@ S3 兼容服务，而不改变业务数据模型。
 | `MIGRATION_DATABASE_URL` | Alembic 迁移数据库 | `alembic.ini` 中的本地 PostgreSQL |
 | `LOCAL_STORAGE_PATH` | 上传文件目录 | `data/local/uploads` |
 | `OBJECT_STORAGE_BACKEND` | 文件后端：`local` 或 `s3` | `local` |
+| `FILE_SCAN_BACKEND` | 上传扫描：`disabled` 或本机 `clamav` | `disabled`，不是已扫描 |
+| `FILE_SCAN_REQUIRED` | 为 `true` 时拒绝禁用扫描的配置 | `false`；企业试点应启用 |
+| `CLAMAV_HOST` / `CLAMAV_PORT` | 扫描器回环 IP 与端口；禁止公网地址 | `127.0.0.1` / `3310` |
+| `CLAMAV_TIMEOUT_SECONDS` | 扫描总超时，范围 1–120 秒；超时拒绝上传 | `30` |
 | `OBJECT_STORAGE_ENDPOINT` | S3 兼容 API 地址；AWS S3 留空 | 无 |
 | `OBJECT_STORAGE_ACCESS_KEY` | 对象存储访问密钥 ID | 无 |
 | `OBJECT_STORAGE_SECRET_KEY` | 对象存储访问密钥 Secret | 无 |
@@ -503,6 +665,9 @@ curl -X POST http://localhost:8000/v1/tenants \
 
 ## 部署流程
 
+> 当前无付费资源方案采用上文的完整本地版。以下 Render、云存储及生产运维内容保留作为技术参考，
+> 不要求本地用户执行，也不意味着已开通或批准购买任何服务。
+
 ### Render 公开演示环境
 
 `Dockerfile` 会构建账号登录版 Next.js 页面，并把它与 FastAPI 放入同一镜像。`render.yaml` 会创建：
@@ -560,7 +725,8 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 
 ### PyCharm 显示 `No jobs available` 并正常退出
 
-运行的是 Worker 占位入口，不是 Web 或 API。请选择 **Local: Web + API**。
+这是旧 Worker 占位入口的输出。新版 Worker 常驻轮询，`--once` 只执行一个周期；它不提供网页。
+完整本地模型网站使用 `.venv/bin/python scripts/local_ai.py start`；升级前备份、安装依赖并重新构建网页。
 
 ### Render 页面显示 `API 请求失败`
 
@@ -574,6 +740,9 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 最新版本。每次阅读都会记录文档、版本和访问级别，但不会把正文写入审计日志。
 
 ### 如何启用语义检索和外部生成模型
+
+当前不产生模型 API 费用的方案请使用[本地 Ollama 配置](#local-ai-setup)。下面的外部服务适配器仅作参考，
+可能产生费用，不属于当前推荐安装流程，不需要申请或填写外部 API 密钥。
 
 默认配置是 `AI_PROVIDER=local`、`EMBEDDING_PROVIDER=disabled`。完成数据出境、供应商保留策略和
 密钥管理评审后，可在部署平台的 Secret 管理器设置 `OPENAI_API_KEY`、`AI_MODEL` 和
@@ -589,6 +758,9 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 
 ## 路线图
 
+以下勾选代表功能代码已实现，不代表线上配置或真实企业验收已完成。
+十项试点计划的实现、部署与验收差距见[企业封闭试点状态](docs/09-closed-pilot-readiness.md)。
+
 - [x] 企业、成员、角色和知识空间
 - [x] 文档上传、解析、版本和发布
 - [x] 权限感知的证据问答、引用与拒答
@@ -602,6 +774,9 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [x] 数据库就绪检查、请求 ID、结构化访问日志与生产配置审计
 - [x] 基于空间最低权限和发布状态的安全文档阅读器
 - [x] 用户设备会话管理与企业管理员强制下线
+- [x] 企业级成员停用/恢复、旧会话访问拦截及成员页操作
+- [x] 本地 SQLite、原件和应用密钥的加密备份、校验与隔离恢复工具
+- [x] 本机 ClamAV 上传前扫描适配、故障拒绝和审计（需另行启动扫描服务）
 - [x] TOTP 双重验证、一次性恢复码与验证码防重放
 - [x] 企业级 MFA 强制策略与恢复码安全轮换
 - [x] 企业管理员审计 CSV 导出、行数门禁与导出行为追踪
@@ -609,11 +784,15 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [x] 可配置的大模型生成、严格结构化输出与引用校验
 - [ ] PostgreSQL pgvector 规模化检索与租户过滤召回评测
 - [ ] 决策证据包和人工审批
-- [ ] 异步 Worker、OCR 和批量导入
-- [ ] 企业 SSO、SCIM 与外部知识连接器
+- [x] 本地中英文 PDF OCR 与 DOCX 表格提取（复杂文件需人工核对）
+- [x] 持久异步 Worker、租约接管、有限重试、取消与管理界面
+- [x] 可选 OIDC SSO / SCIM 用户和组同步、停用隔离与 MFA 保留（待真实 IdP 联调）
+- [ ] 批量导入、分布式任务容量验收与外部知识连接器
 - [ ] 评测集、安全门禁、备份和生产运维
 
 ## 项目文档
+
+- [后台处理、SSO 与 SCIM 配置和验收](docs/10-worker-sso-scim.md)
 
 - [项目章程](docs/00-project-charter.md)
 - [产品定位](docs/01-product-positioning.md)
@@ -627,3 +806,4 @@ Render Cron Job；配置定时任务和私有备份桶之前，不能把公开�
 - [备份、恢复演练与数据保留](docs/06-backup-and-recovery.md)
 - [生产运行、监控与配置审计](docs/07-production-operations.md)
 - [混合检索与可配置 AI](docs/08-hybrid-retrieval-and-ai.md)
+- [企业封闭试点状态、本地备份与文件安全扫描](docs/09-closed-pilot-readiness.md)

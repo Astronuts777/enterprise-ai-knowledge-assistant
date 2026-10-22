@@ -18,6 +18,7 @@
 - `APP_ENV=production`、HTTPS 公开地址和账号登录模式；
 - PostgreSQL、独立应用加密密钥和持久 S3 文件存储；
 - 强制邮箱验证与 SMTP 邮件后端；
+- 强制开启本机 ClamAV 文件扫描（仅检查配置，病毒库新鲜度和扫描服务可用性需另行验收）；
 - 独立备份加密密钥、持久 S3 备份存储和最低保留期。
 
 执行命令：
@@ -32,6 +33,9 @@ PYTHONPATH=services/api/src:packages/core/src \
 线上自动备份；这不会影响演示站正常启动。
 
 ## 请求追踪
+
+本地试点的完整备份恢复和上传扫描步骤见[封闭试点状态](09-closed-pilot-readiness.md)。
+配置门禁全绿不等于已经验证 SMTP、对象存储、模型或扫描服务的实际可用性。
 
 每个 HTTP 响应都包含 `X-Request-ID`。客户端可以提供 8–64 位、只包含字母、数字、点、下划线或
 连字符的请求 ID；非法值会被服务端替换。API 日志使用单行 JSON 记录：
@@ -86,3 +90,10 @@ curl --fail --show-error https://<host>/readyz
 
 企业管理员可从审计页面导出 CSV 合规快照。导出接口复用企业级授权和 MFA 策略，单次最多 5000 行；
 超过上限时应缩小时间范围或筛选条件。每次成功或超限失败的导出都留下审计事件，便于复核证据链。
+
+## 异步处理与身份接入的新增发布门禁
+
+见 [Worker、SSO、SCIM 操作说明](10-worker-sso-scim.md)。升级前停止 Worker 并验证备份，先迁移数据库再启动 API/Worker。
+PostgreSQL Worker 需明确的 `WORKER_TENANT_IDS`；没有 Worker 的部署保留同步模式，不能只打开异步开关。
+OIDC/SCIM 默认关闭，仅在受控配置和秘密变量齐备后开启。生产环境需要 HTTPS，代理访问日志须去掉 OAuth 回调查询串与认证头。
+对排队时间、失败率、扫描/模型不可用及租约频繁过期建立真实告警；代码中的 `/readyz` 只证明数据库可用，不证明 Worker/IdP 正常。

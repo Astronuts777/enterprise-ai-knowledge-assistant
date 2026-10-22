@@ -60,9 +60,7 @@ def current_user_id(
     session: Annotated[Session, Depends(get_session)],
     development_user_id: Annotated[UUID | None, Header(alias="X-Dev-User-Id")] = None,
     demo_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
-    account_session: Annotated[
-        str | None, Cookie(alias="enterprise_ai_session")
-    ] = None,
+    account_session: Annotated[str | None, Cookie(alias="enterprise_ai_session")] = None,
 ) -> UUID:
     """Resolve a local dev header or a server-signed public-demo browser session."""
 
@@ -137,7 +135,12 @@ def authorize_tenant_action(
             Membership.user_id == user_id,
         )
     )
-    if tenant is None or membership is None:
+    if (
+        tenant is None
+        or membership is None
+        or not membership.active
+        or not membership.provisioning_active
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resource not found or access denied",
@@ -205,6 +208,8 @@ def tenant_membership(session: Session, tenant_id: UUID, user_id: UUID) -> Membe
         select(Membership).where(
             Membership.tenant_id == tenant_id,
             Membership.user_id == user_id,
+            Membership.active.is_(True),
+            Membership.provisioning_active.is_(True),
         )
     )
 
@@ -277,9 +282,7 @@ def authorize_space_access(
     return space
 
 
-def can_manage_space(
-    session: Session, *, tenant_id: UUID, user_id: UUID, space_id: UUID
-) -> bool:
+def can_manage_space(session: Session, *, tenant_id: UUID, user_id: UUID, space_id: UUID) -> bool:
     """Check management access without writing a denial event for UI capability checks."""
 
     space = session.get(Space, space_id)

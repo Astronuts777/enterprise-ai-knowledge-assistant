@@ -515,7 +515,9 @@ button { cursor: pointer; }
 .role-pill { background: #eef3ed; border-radius: 2rem; color: #526c5d !important; justify-self: start; padding: 0.28rem 0.55rem; }
 .active-status { align-items: center; display: flex; gap: 0.4rem; }
 .active-status i { background: #74a659; border-radius: 50%; height: 0.4rem; width: 0.4rem; }
-.member-session-action { justify-self: start; }
+.active-status.suspended { color: #8a5049; }
+.active-status.suspended i { background: #8a5049; }
+.member-session-action { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-self: start; }
 .member-session-action button { background: white; border: 1px solid #d6ded9; border-radius: 0.45rem; color: #8a5049; font-size: 0.62rem; font-weight: 750; padding: 0.45rem 0.55rem; }
 .member-session-action button:disabled { cursor: wait; opacity: 0.55; }
 

@@ -54,8 +54,8 @@ def decrypt_bytes(value: bytes, *, context: bytes) -> bytes:
 
 
 def encrypt_text(value: str) -> str:
-    if value.startswith(ENCRYPTED_PREFIX):
-        return value
+    # ORM inputs are plaintext, even when user text resembles an encrypted envelope.
+    # Migration code has its own legacy conversion; never skip encryption here.
     encrypted = encrypt_bytes(value.encode(), context=b"database-field:v1")
     return ENCRYPTED_PREFIX + base64.urlsafe_b64encode(encrypted).decode()
 

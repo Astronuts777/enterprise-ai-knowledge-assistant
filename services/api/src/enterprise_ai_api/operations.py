@@ -122,6 +122,13 @@ def assess_production_posture() -> ProductionPosture:
             detail="OBJECT_STORAGE_BACKEND must be s3 for enterprise files",
         ),
         OperationalCheck(
+            name="file_security_scan",
+            passed=(os.getenv("FILE_SCAN_BACKEND", "disabled").lower() == "clamav"
+                    and _enabled("FILE_SCAN_REQUIRED")),
+            required=True,
+            detail="Enable required ClamAV scanning; verify daemon and signatures separately",
+        ),
+        OperationalCheck(
             name="verified_email_delivery",
             passed=email_required and email_enabled,
             required=True,

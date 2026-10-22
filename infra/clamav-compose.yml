@@ -1,0 +1,14 @@
+# Optional local-only scanner; does not start the database or other infrastructure.
+# Use a licensed/free container runtime suitable for your organisation.
+name: enterprise-ai-file-scanner
+services:
+  clamav:
+    image: clamav/clamav:1.4
+    ports:
+      - "127.0.0.1:3310:3310"
+    volumes:
+      - clamav-signatures:/var/lib/clamav
+    restart: unless-stopped
+
+volumes:
+  clamav-signatures:

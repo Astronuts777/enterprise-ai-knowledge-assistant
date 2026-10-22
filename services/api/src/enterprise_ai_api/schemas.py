@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 TenantRole = Literal["enterprise_admin", "knowledge_admin", "member"]
 SpaceRole = Literal["manager", "viewer"]
 Classification = Literal["internal", "confidential", "restricted"]
-DocumentStatus = Literal["ready", "published", "superseded", "failed"]
+DocumentStatus = Literal["queued", "processing", "ready", "published", "superseded", "failed"]
 MfaPolicy = Literal["off", "admins", "all"]
 
 
@@ -37,12 +37,18 @@ class MembershipCreate(BaseModel):
     role: TenantRole
 
 
+class MembershipStatusUpdate(BaseModel):
+    active: bool
+
+
 class MembershipResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     tenant_id: UUID
     user_id: UUID
     role: TenantRole
+    active: bool
+    provisioning_active: bool
     created_at: datetime
 
 
@@ -64,6 +70,7 @@ class AccountResponse(BaseModel):
     tenant_id: UUID | None
     email_verified: bool
     mfa_enabled: bool
+    password_login_enabled: bool = True
 
 
 class MfaChallengeResponse(BaseModel):

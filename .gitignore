@@ -13,6 +13,7 @@ Thumbs.db
 !.env.example
 *.pem
 *.key
+*.local-backup.enc
 
 # Dependencies and build output
 node_modules/

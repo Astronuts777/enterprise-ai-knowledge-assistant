@@ -75,6 +75,8 @@ def test_production_posture_reports_missing_enterprise_controls(
 
 
 def test_production_posture_passes_with_all_controls(monkeypatch) -> None:
+    monkeypatch.setenv("FILE_SCAN_BACKEND", "clamav")
+    monkeypatch.setenv("FILE_SCAN_REQUIRED", "true")
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("DATABASE_URL", "postgresql://app:secret@db/enterprise_ai")
     monkeypatch.setenv("ACCOUNT_AUTH_MODE", "true")

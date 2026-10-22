@@ -13,6 +13,8 @@ export type Membership = {
   tenant_id: string;
   user_id: string;
   role: MembershipRole;
+  active: boolean;
+  provisioning_active?: boolean;
   created_at: string;
 };
 
@@ -50,7 +52,7 @@ export type AuditEvent = {
   created_at: string;
 };
 
-export type DocumentStatus = "ready" | "published" | "superseded" | "failed";
+export type DocumentStatus = "queued" | "processing" | "ready" | "published" | "superseded" | "failed";
 
 export type KnowledgeDocument = {
   id: string;
@@ -164,6 +166,7 @@ export type Account = {
   tenant_id: string | null;
   email_verified: boolean;
   mfa_enabled: boolean;
+  password_login_enabled?: boolean;
 };
 
 export type MfaChallenge = {
@@ -246,6 +249,19 @@ async function accountRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getCurrentAccount(): Promise<Account> {
   return accountRequest<Account>("/v1/auth/me");
+}
+
+export async function getSsoProviders(): Promise<{ name: string; login_url: string }[]> {
+  const providers = await accountRequest<{ name: string; login_url: string }[]>("/v1/auth/sso/providers");
+  return providers.map((provider) => ({ ...provider, login_url: `${API_BASE_URL}${provider.login_url}` }));
+}
+
+export function completeSsoLogin(): Promise<MfaChallenge> {
+  return accountRequest<MfaChallenge>("/v1/auth/sso/complete", { method: "POST" });
+}
+
+export function changeDocumentJob(actorId: string, tenantId: string, versionId: string, operation: "retry" | "cancel") {
+  return request<{ status: DocumentStatus }>(`/v1/tenants/${tenantId}/document-versions/${versionId}/job/${operation}`, actorId, { method: "POST" });
 }
 
 export function registerAccount(input: {
@@ -467,6 +483,14 @@ export function removeSpaceMember(
 
 export function listMembers(actorId: string, tenantId: string): Promise<Membership[]> {
   return request<Membership[]>(`/v1/tenants/${tenantId}/members`, actorId);
+}
+
+export function updateMemberStatus(
+  actorId: string, tenantId: string, userId: string, active: boolean,
+): Promise<Membership> {
+  return request<Membership>(`/v1/tenants/${tenantId}/members/${userId}/status`, actorId, {
+    method: "PATCH", body: JSON.stringify({ active }),
+  });
 }
 
 export function listAuditEvents(

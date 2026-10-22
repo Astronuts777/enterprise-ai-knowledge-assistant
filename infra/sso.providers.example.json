@@ -1,0 +1,14 @@
+[
+  {
+    "key": "company",
+    "display_name": "我的企业",
+    "tenant_id": "00000000-0000-0000-0000-000000000001",
+    "issuer": "https://identity.example.com/realms/company",
+    "client_id": "enterprise-ai",
+    "authorization_endpoint": "https://identity.example.com/realms/company/protocol/openid-connect/auth",
+    "token_endpoint": "https://identity.example.com/realms/company/protocol/openid-connect/token",
+    "jwks_uri": "https://identity.example.com/realms/company/protocol/openid-connect/certs",
+    "client_secret_env": "COMPANY_OIDC_CLIENT_SECRET",
+    "scim_token_env": "COMPANY_SCIM_TOKEN"
+  }
+]

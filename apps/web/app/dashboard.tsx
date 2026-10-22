@@ -27,6 +27,9 @@ import {
   createTenant,
   downloadAuditExport,
   getCurrentAccount,
+  getSsoProviders,
+  completeSsoLogin,
+  changeDocumentJob,
   getDocumentContent,
   getTenant,
   getKnowledgeStatus,
@@ -58,6 +61,7 @@ import {
   uploadDocument,
   uploadDocumentVersion,
   updateTenantSecurityPolicy,
+  updateMemberStatus,
   verifyEmail,
 } from "../lib/api";
 
@@ -167,6 +171,7 @@ function formatLocator(value: string): string {
 export default function Dashboard() {
   const [actorId, setActorId] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
+  const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
   const [mfaEnabled, setMfaEnabled] = useState(false);
   const [mfaBlocked, setMfaBlocked] = useState(false);
   const [tenantId, setTenantId] = useState<string | null>(null);
@@ -254,6 +259,7 @@ export default function Dashboard() {
           if (cancelled) return;
           setActorId(account.user_id);
           setAccountEmail(account.email);
+          setPasswordLoginEnabled(account.password_login_enabled !== false);
           setMfaEnabled(account.mfa_enabled);
           setTenantId(account.tenant_id);
           if (account.tenant_id) {
@@ -302,6 +308,7 @@ export default function Dashboard() {
   const finishAccountSignIn = useCallback(async (account: Account) => {
     setActorId(account.user_id);
     setAccountEmail(account.email);
+    setPasswordLoginEnabled(account.password_login_enabled !== false);
     setMfaEnabled(account.mfa_enabled);
     setTenantId(account.tenant_id);
     if (account.tenant_id) {
@@ -309,6 +316,36 @@ export default function Dashboard() {
       await loadWorkspace(account.user_id, account.tenant_id);
     }
   }, [loadWorkspace]);
+
+  const hasPendingDocuments = Object.values(documentsBySpace).some((items) => items.some((item) => ["queued", "processing"].includes(item.latest_version.status)));
+  useEffect(() => {
+    if (!tenantId || !actorId || !activeSpace || view !== "documents" || !hasPendingDocuments) return;
+    let cancelled = false;
+    let inFlight = false;
+    const timer = window.setInterval(async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      try {
+        const documents = await listDocuments(actorId, tenantId, activeSpace.id);
+        if (!cancelled) setDocumentsBySpace((current) => ({ ...current, [activeSpace.id]: documents }));
+      } catch {
+        if (!cancelled) { window.clearInterval(timer); setNotice("后台状态刷新失败，请重新进入空间检查登录和权限。"); }
+      } finally { inFlight = false; }
+    }, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [tenantId, actorId, activeSpace, view, hasPendingDocuments]);
+
+  async function handleDocumentJob(item: DocumentSummary, operation: "retry" | "cancel") {
+    if (!tenantId || !activeSpace || !window.confirm(operation === "cancel" ? "取消这次后台处理？原件仍会加密保留。" : "重新处理此版本？请先确认文件和本地服务可用。")) return;
+    setBusy(true);
+    try {
+      await changeDocumentJob(actorId, tenantId, item.latest_version.id, operation);
+      const documents = await listDocuments(actorId, tenantId, activeSpace.id);
+      setDocumentsBySpace((current) => ({ ...current, [activeSpace.id]: documents }));
+      setNotice(operation === "retry" ? "任务已重新排队" : "任务已取消");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "任务操作失败"); }
+    finally { setBusy(false); }
+  }
 
   async function handleAcceptAccess(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -480,14 +517,14 @@ export default function Dashboard() {
     setNotice(null);
     try {
       if (versionTarget) {
-        await uploadDocumentVersion(actorId, tenantId, versionTarget.document.id, file);
-        setNotice("新版本已上传，确认内容后即可发布");
+        const uploaded = await uploadDocumentVersion(actorId, tenantId, versionTarget.document.id, file);
+        setNotice(uploaded.status === "queued" ? "新版本已加密保存，正在等待后台处理" : "新版本已上传，请检查处理状态后发布");
       } else {
-        await uploadDocument(actorId, tenantId, activeSpace.id, {
+        const uploaded = await uploadDocument(actorId, tenantId, activeSpace.id, {
           title: String(form.get("title") ?? "").trim() || file.name.replace(/\.[^.]+$/, ""),
           file,
         });
-        setNotice("文档已解析，确认内容后即可发布");
+        setNotice(uploaded.version.status === "queued" ? "文档已加密保存，正在等待后台处理" : "文档已上传，请检查处理状态后发布");
       }
       const documents = await listDocuments(actorId, tenantId, activeSpace.id);
       setDocumentsBySpace((current) => ({ ...current, [activeSpace.id]: documents }));
@@ -769,6 +806,26 @@ export default function Dashboard() {
     }
   }
 
+  async function handleMemberStatus(member: Membership) {
+    if (!tenantId || member.user_id === actorId) return;
+    const active = !member.active;
+    const message = active
+      ? "恢复后，该成员将重新获得原企业角色与空间权限。确认恢复？"
+      : "停用后，该成员现有登录也不能继续访问本企业资料；其他企业的权限不受影响。确认停用？";
+    if (!window.confirm(message)) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const updated = await updateMemberStatus(actorId, tenantId, member.user_id, active);
+      setMembers((current) => current.map((item) => item.user_id === updated.user_id ? updated : item));
+      setNotice(active ? "已恢复成员及原空间权限" : "已停用成员，本企业访问权限立即失效");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "成员状态更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(TENANT_KEY);
     setTenantId(null);
@@ -903,13 +960,14 @@ export default function Dashboard() {
               onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
               onPublish={handlePublish}
               onReindex={handleReindex}
+              onJob={handleDocumentJob}
               onOpen={handleOpenDocument}
               canManage={canManageActiveSpace}
               onManageAccess={() => setSpaceAccessDialog(true)}
             />
           )}
           {!mfaBlocked && view === "members" && (
-            <MembersView members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} />
+            <MembersView members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} onStatusChange={handleMemberStatus} />
           )}
           {!mfaBlocked && view === "audit" && actorMembership?.role === "enterprise_admin" && (
             <AuditView events={auditEvents} busy={busy} onExport={handleExportAudit} />
@@ -978,7 +1036,7 @@ export default function Dashboard() {
       </Dialog>}
       {mfaDialog === "enable" && <Dialog title="启用双重验证" description="先确认账号密码，再绑定你的身份验证器。" onClose={() => setMfaDialog(null)}>
         <form className="dialog-form" onSubmit={handleStartMfa}>
-          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          {passwordLoginEnabled ? <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label> : <><input name="password" type="hidden" value="sso" /><p>使用最近 5 分钟内的企业登录确认身份；过期请退出后重新通过 SSO 登录。</p></>}
           <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">继续</button></div>
         </form>
       </Dialog>}
@@ -996,14 +1054,14 @@ export default function Dashboard() {
       </Dialog>}
       {mfaDialog === "regenerate" && <Dialog title="重新生成恢复码" description="验证后，全部旧恢复码会立即失效。新恢复码只显示一次。" onClose={() => setMfaDialog(null)}>
         <form className="dialog-form" onSubmit={handleRegenerateRecoveryCodes}>
-          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          {passwordLoginEnabled ? <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label> : <><input name="password" type="hidden" value="sso" /><p>需要最近 5 分钟内的企业登录。</p></>}
           <label>验证码或现有恢复码<input name="code" autoComplete="one-time-code" minLength={6} maxLength={32} required /></label>
           <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="primary-button" disabled={busy} type="submit">生成新恢复码</button></div>
         </form>
       </Dialog>}
       {mfaDialog === "disable" && <Dialog title="关闭双重验证" description="需要同时验证当前密码和身份验证器验证码（也可使用恢复码）。其他设备会被强制退出。" onClose={() => setMfaDialog(null)}>
         <form className="dialog-form" onSubmit={handleDisableMfa}>
-          <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label>
+          {passwordLoginEnabled ? <label>当前密码<input name="password" type="password" autoComplete="current-password" required /></label> : <><input name="password" type="hidden" value="sso" /><p>需要最近 5 分钟内的企业登录。</p></>}
           <label>验证码或恢复码<input name="code" autoComplete="one-time-code" minLength={6} maxLength={32} required /></label>
           <div className="dialog-actions"><button type="button" onClick={() => setMfaDialog(null)}>取消</button><button className="danger-button" disabled={busy} type="submit">确认关闭</button></div>
         </form>
@@ -1031,6 +1089,21 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
   const [pendingInvitation, setPendingInvitation] = useState<{ tenantId: string; token: string } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [ssoProviders, setSsoProviders] = useState<{ name: string; login_url: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getSsoProviders().then((providers) => { if (!cancelled) setSsoProviders(providers); }).catch(() => {});
+    // Defer until after Strict Mode's effect cleanup; consume the handoff only once.
+    queueMicrotask(() => {
+      if (cancelled || parameters.get("mode") !== "sso") return;
+      window.history.replaceState({}, "", window.location.pathname);
+      completeSsoLogin().then((challenge) => {
+        if (!cancelled) { setMfaChallenge(challenge.challenge_token); setMode("mfa"); }
+      }).catch(() => { if (!cancelled) setError("企业登录验证已过期，请重新点击企业登录。"); });
+    });
+    return () => { cancelled = true; };
+  }, [parameters]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1173,6 +1246,7 @@ function AuthScreen({ busy, onBusy, onReady }: { busy: boolean; onBusy: (value: 
         </div>}
         <h2>{title}</h2>
         <p>{description}</p>
+        {mode === "login" && ssoProviders.map((provider) => <a className="secondary-button" key={provider.login_url} href={provider.login_url}>{provider.name} · 单点登录</a>)}
         {["login", "create", "join", "forgot"].includes(mode) && <label>邮箱<input name="email" type="email" autoComplete="email" defaultValue={pendingEmail} placeholder="name@company.com" required /></label>}
         {["login", "create", "join", "reset"].includes(mode) && <label>{mode === "reset" ? "新密码" : "密码"}<input name="password" type="password" minLength={12} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="至少 12 个字符" required /></label>}
         {mode === "create" && <label>企业名称<input name="organization_name" minLength={2} maxLength={160} placeholder="例如：远景科技" required /></label>}
@@ -1295,10 +1369,11 @@ function SpacesView({ spaces, documentsBySpace, onCreate, onOpen }: { spaces: Sp
   </>;
 }
 
-function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onOpen, onManageAccess, onReindex }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onOpen: (document: DocumentSummary) => void; onManageAccess: () => void; onReindex: (document: DocumentSummary) => void }) {
-  const statusLabels = { ready: "待发布", published: "已发布", superseded: "已替代", failed: "解析失败" };
+function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, onNewVersion, onPublish, onOpen, onManageAccess, onReindex, onJob }: { space: Space; documents: DocumentSummary[]; busy: boolean; canManage: boolean; onBack: () => void; onUpload: () => void; onNewVersion: (document: DocumentSummary) => void; onPublish: (document: DocumentSummary) => void; onOpen: (document: DocumentSummary) => void; onManageAccess: () => void; onReindex: (document: DocumentSummary) => void; onJob: (document: DocumentSummary, operation: "retry" | "cancel") => void }) {
+  const statusLabels = { queued: "后台排队中", processing: "后台处理中", ready: "待发布", published: "已发布", superseded: "已替代", failed: "处理失败" };
   return <>
     <button className="back-button" onClick={onBack}><Icon name="back" />返回知识空间</button>
+    {canManage && documents.some((item) => ["queued", "processing", "failed"].includes(item.latest_version.status)) && <section className="knowledge-status"><h2>文件处理任务</h2><p>状态每 5 秒自动刷新；持续排队时，请确认本地 Worker 已启动。失败的旧同步版本请上传新版本。</p>{documents.filter((item) => ["queued", "processing", "failed"].includes(item.latest_version.status)).map((item) => <div className="index-row" key={item.document.id}><span>{item.document.title} · {statusLabels[item.latest_version.status]} {item.latest_version.error_message}</span><button disabled={busy || item.latest_version.error_message === "unsafe_file"} onClick={() => onJob(item, item.latest_version.status === "failed" ? "retry" : "cancel")}>{item.latest_version.status === "failed" ? "重试后台任务" : "取消任务"}</button></div>)}</section>}
     {canManage && documents.length > 0 && <details className="knowledge-status"><summary>语义检索索引管理</summary><p>配置模型后，可为旧资料建立或更新索引。若使用外部模型，此操作会将文档解析正文发送给已配置的模型服务。索引不改变发布状态。</p>{documents.filter((item) => ["ready", "published"].includes(item.latest_version.status)).map((item) => <div className="index-row" key={item.document.id}><span>{item.document.title} · v{item.latest_version.version_number}</span><button className="secondary-button" disabled={busy} onClick={() => onReindex(item)}>建立语义索引</button></div>)}</details>}
     <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>只有获得该空间授权的成员可以读取资料和参与检索。</p></div><div className="heading-actions">{canManage && <button className="secondary-button" onClick={onManageAccess}><Icon name="shield" />管理访问</button>}{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button>}</div></div>
     {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有已发布资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><button className="document-open" disabled={busy} onClick={() => onOpen(item)}><i><Icon name="file" /></i><p><b>{item.document.title}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></button><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions"><button className="view-action" disabled={busy} onClick={() => onOpen(item)}>查看</button>{canManage && item.latest_version.status === "ready" && <button className="publish-action" disabled={busy} onClick={() => onPublish(item)}>发布</button>}{canManage && <button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button>}{!canManage && <span>只读</span>}</div></article>)}</section>}
@@ -1310,9 +1385,17 @@ function DocumentReader({ content, onClose }: { content: DocumentContent; onClos
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section aria-modal="true" className="dialog document-reader" role="dialog"><button aria-label="关闭文档" className="dialog-close" onClick={onClose}>×</button><p className="kicker">安全文档阅读器</p><h2>{content.document.title}</h2><div className="reader-meta"><span>{content.version.filename}</span><span>v{content.version.version_number}</span><span>{statusLabel}</span><span>{formatBytes(content.version.byte_size)}</span></div><div className="reader-content">{content.chunks.length === 0 ? <div className="reader-empty"><Icon name="file" /><p>这个版本没有可显示的解析内容。</p></div> : content.chunks.map((chunk) => <article key={chunk.id}><small>{formatLocator(chunk.locator)}</small><p>{chunk.text}</p></article>)}</div><footer><Icon name="shield" />内容已通过企业、空间和版本权限校验；本次查看已写入审计日志。</footer></section></div>;
 }
 
-function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSessions }: { members: Membership[]; actorId: string; busy: boolean; canManage: boolean; onAdd: () => void; onRevokeSessions: (userId: string) => void }) {
+function MembersView({ members, actorId, busy, canManage, onAdd, onRevokeSessions, onStatusChange }: { members: Membership[]; actorId: string; busy: boolean; canManage: boolean; onAdd: () => void; onRevokeSessions: (userId: string) => void; onStatusChange: (member: Membership) => void }) {
   return <><div className="page-heading"><div><p className="kicker">访问控制</p><h1>成员与权限</h1><p>企业角色决定成员能够管理和访问哪些内容。</p></div>{canManage && <button className="primary-button" onClick={onAdd}><Icon name="plus" />添加成员</button>}</div>
-    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card"><div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span><span>会话</span></div>{members.map((member) => <div className="member-row" key={member.user_id}><div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? (ACCOUNT_MODE ? "当前账号" : PUBLIC_DEMO ? "演示管理员" : "本地演示管理员") : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div><span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span><span className="active-status"><i />已启用</span><span className="member-session-action">{ACCOUNT_MODE && member.user_id !== actorId ? <button disabled={busy} onClick={() => onRevokeSessions(member.user_id)}>强制下线</button> : "当前设备"}</span></div>)}</section>}
+    {!canManage ? <section className="empty-state"><span><Icon name="shield" /></span><h2>仅企业管理员可查看</h2><p>你的资料访问权限不受影响，但成员目录受到额外保护。</p></section> : <section className="members-card">
+      <div className="table-head"><span>成员</span><span>角色</span><span>加入时间</span><span>状态</span><span>操作</span></div>
+      {members.map((member) => <div className="member-row" key={member.user_id}>
+        <div><i>{member.user_id.slice(0, 2).toUpperCase()}</i><p><b>{member.user_id === actorId ? "当前账号" : `用户 ${shortId(member.user_id)}`}</b><span>{shortId(member.user_id)}</span></p></div>
+        <span className="role-pill">{roleLabels[member.role]}</span><span>{formatDate(member.created_at)}</span>
+        <span className={`active-status ${member.active && member.provisioning_active !== false ? "" : "suspended"}`}><i />{member.provisioning_active === false ? "身份系统已停用" : member.active ? "已启用" : "管理员已停用"}</span>
+        <span className="member-session-action">{member.user_id !== actorId ? <>{ACCOUNT_MODE && <button disabled={busy} onClick={() => onRevokeSessions(member.user_id)}>强制下线</button>}<button disabled={busy || member.provisioning_active === false} onClick={() => onStatusChange(member)}>{member.active ? "停用成员" : "恢复成员"}</button></> : "当前账号"}</span>
+      </div>)}
+    </section>}
   </>;
 }
 

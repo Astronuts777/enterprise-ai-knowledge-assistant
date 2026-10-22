@@ -8,7 +8,7 @@ from urllib.parse import quote, urlencode
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -134,13 +134,40 @@ def _client_label(request: Request) -> str:
     return f"{browser} · {platform}"
 
 
-def _new_session(session: Session, user_id: UUID, request: Request) -> str:
+def _new_session(
+    session: Session, user_id: UUID, request: Request, *, auth_method="password"
+) -> str:
+    user = session.get(User, user_id)
+    if user.password_hash is None:
+        if auth_method != "oidc":
+            raise HTTPException(403, "This account requires enterprise sign-in")
+        # Serialize federated session creation with SCIM revocation.
+        set_tenant_context(session, user.default_tenant_id)
+        session.execute(
+            update(Membership)
+            .where(
+                Membership.tenant_id == user.default_tenant_id,
+                Membership.user_id == user_id,
+            )
+            .values(provisioning_active=Membership.provisioning_active)
+        )
+        membership = session.scalar(
+            select(Membership)
+            .where(
+                Membership.tenant_id == user.default_tenant_id,
+                Membership.user_id == user_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        if membership is None or not membership.active or not membership.provisioning_active:
+            raise HTTPException(403, "Federated account is suspended")
     token = new_token()
     session.add(
         AuthSession(
             user_id=user_id,
             token_hash=token_hash(token),
             client_label=_client_label(request),
+            auth_method=auth_method,
             expires_at=datetime.now(UTC) + SESSION_LIFETIME,
         )
     )
@@ -156,6 +183,7 @@ def _account_response(user: User) -> AccountResponse:
         tenant_id=user.default_tenant_id,
         email_verified=user.email_verified_at is not None,
         mfa_enabled=user.mfa_enabled_at is not None,
+        password_login_enabled=user.password_hash is not None,
     )
 
 
@@ -187,11 +215,13 @@ def _issue_account_token(session: Session, user_id: UUID, purpose: str) -> str:
 
 def _valid_account_token(session: Session, raw_token: str, purpose: str) -> AccountToken:
     account_token = session.scalar(
-        select(AccountToken).where(
+        select(AccountToken)
+        .where(
             AccountToken.token_hash == token_hash(raw_token),
             AccountToken.purpose == purpose,
             AccountToken.consumed_at.is_(None),
-        ).with_for_update()
+        )
+        .with_for_update()
     )
     if account_token is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
@@ -254,8 +284,7 @@ def _send_password_reset_email(
         recipient=recipient,
         subject="重置你的 Enterprise AI 密码",
         text=(
-            f"请在 30 分钟内打开以下链接重置密码：\n\n{link}\n\n"
-            "如果不是你本人操作，请忽略此邮件。"
+            f"请在 30 分钟内打开以下链接重置密码：\n\n{link}\n\n如果不是你本人操作，请忽略此邮件。"
         ),
     )
 
@@ -337,9 +366,7 @@ def register_account(
         set_tenant_context(session, tenant.id)
         session.add(tenant)
         session.flush()
-        session.add(
-            Membership(tenant_id=tenant.id, user_id=user.id, role="enterprise_admin")
-        )
+        session.add(Membership(tenant_id=tenant.id, user_id=user.id, role="enterprise_admin"))
         user.default_tenant_id = tenant.id
 
     if tenant is not None:
@@ -492,7 +519,9 @@ def complete_mfa_login(
         user.mfa_last_counter = counter
     if recovery_code is not None:
         recovery_code.used_at = now
-    session_token = _new_session(session, user.id, request)
+    session_token = _new_session(
+        session, user.id, request, auth_method="oidc" if user.password_hash is None else "password"
+    )
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         record_audit_event(
@@ -509,6 +538,23 @@ def complete_mfa_login(
     return _account_response(user)
 
 
+def _confirm_security_identity(session: Session, request: Request, user: User, password: str):
+    if user.password_hash is not None:
+        if not password_matches(password, user.password_hash):
+            raise HTTPException(403, "Password is incorrect")
+        return
+    stored = session.scalar(
+        select(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.token_hash == token_hash(request.cookies.get(SESSION_COOKIE_NAME, "")),
+            AuthSession.auth_method == "oidc",
+            AuthSession.created_at > datetime.now(UTC) - timedelta(minutes=5),
+        )
+    )
+    if stored is None:
+        raise HTTPException(403, "Sign in through SSO again before changing MFA")
+
+
 @router.post("/auth/mfa/setup", response_model=MfaSetupResponse)
 def start_mfa_setup(
     payload: MfaSetupRequest,
@@ -517,13 +563,12 @@ def start_mfa_setup(
     session: DatabaseSession,
 ) -> MfaSetupResponse:
     user = session.get(User, user_id)
-    if user is None or user.password_hash is None:
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
         )
-    if not password_matches(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    _confirm_security_identity(session, request, user, payload.password)
     if user.mfa_enabled_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is already enabled")
     if user.email_ciphertext is None:
@@ -599,19 +644,14 @@ def confirm_mfa_setup(
 @router.post("/auth/mfa/recovery-codes", response_model=MfaConfirmResponse)
 def regenerate_mfa_recovery_codes(
     payload: MfaRecoveryCodesRequest,
+    request: Request,
     user_id: CurrentUserId,
     session: DatabaseSession,
 ) -> MfaConfirmResponse:
     user = session.get(User, user_id)
-    if (
-        user is None
-        or user.password_hash is None
-        or user.mfa_enabled_at is None
-        or user.mfa_secret_ciphertext is None
-    ):
+    if user is None or user.mfa_enabled_at is None or user.mfa_secret_ciphertext is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
-    if not password_matches(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    _confirm_security_identity(session, request, user, payload.password)
     verified = _verify_user_mfa_code(session, user, payload.code)
     if verified is None:
         raise HTTPException(
@@ -654,15 +694,9 @@ def disable_mfa(
     session: DatabaseSession,
 ) -> AccountResponse:
     user = session.get(User, user_id)
-    if (
-        user is None
-        or user.password_hash is None
-        or user.mfa_enabled_at is None
-        or user.mfa_secret_ciphertext is None
-    ):
+    if user is None or user.mfa_enabled_at is None or user.mfa_secret_ciphertext is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
-    if not password_matches(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password is incorrect")
+    _confirm_security_identity(session, request, user, payload.password)
     if user.default_tenant_id is not None:
         set_tenant_context(session, user.default_tenant_id)
         tenant = session.get(Tenant, user.default_tenant_id)
@@ -720,7 +754,7 @@ def verify_email(
 ) -> AccountResponse:
     account_token = _valid_account_token(session, payload.token, "email_verification")
     user = session.get(User, account_token.user_id)
-    if user is None or user.status != "active":
+    if user is None or user.status != "active" or user.password_hash is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
     now = datetime.now(UTC)
     user.email_verified_at = now
@@ -756,6 +790,7 @@ def resend_verification(
     user = session.scalar(select(User).where(User.email_lookup_hash == blind_index(email)))
     if (
         user is not None
+        and user.password_hash is not None
         and user.email_verified_at is None
         and request.app.state.email_sender.enabled
         and not _recent_token_exists(session, user.id, "email_verification")
@@ -799,6 +834,7 @@ def forgot_password(
         user is not None
         and user.status == "active"
         and request.app.state.email_sender.enabled
+        and user.password_hash is not None
         and not _recent_token_exists(session, user.id, "password_reset")
     ):
         raw_token = _issue_account_token(session, user.id, "password_reset")
@@ -832,7 +868,7 @@ def reset_password(
 ) -> AccountResponse | MfaChallengeResponse:
     account_token = _valid_account_token(session, payload.token, "password_reset")
     user = session.get(User, account_token.user_id)
-    if user is None or user.status != "active":
+    if user is None or user.status != "active" or user.password_hash is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token is invalid")
     now = datetime.now(UTC)
     user.password_hash = password_hash(payload.password)
@@ -1016,11 +1052,7 @@ def revoke_member_sessions(
     )
     membership = session.get(Membership, (tenant_id, target_user_id))
     target_user = session.get(User, target_user_id)
-    if (
-        membership is None
-        or target_user is None
-        or target_user.default_tenant_id != tenant_id
-    ):
+    if membership is None or target_user is None or target_user.default_tenant_id != tenant_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resource not found or access denied",
@@ -1148,6 +1180,10 @@ def accept_invitation(
     if membership is None:
         session.add(Membership(tenant_id=tenant_id, user_id=user_id, role=invitation.role))
     else:
+        if not membership.active:
+            raise HTTPException(
+                status_code=409, detail="Suspended membership requires admin restoration"
+            )
         membership.role = invitation.role
     invitation.accepted_at = now
     user.default_tenant_id = tenant_id

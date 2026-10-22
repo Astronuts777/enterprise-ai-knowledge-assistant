@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from enterprise_ai_api.models import Membership, Space, SpaceMembership, Tenant,
 from enterprise_ai_api.schemas import (
     MembershipCreate,
     MembershipResponse,
+    MembershipStatusUpdate,
     SpaceCreate,
     SpaceMembershipCreate,
     SpaceMembershipResponse,
@@ -161,6 +162,10 @@ def add_member(
         membership = Membership(tenant_id=tenant_id, user_id=payload.user_id, role=payload.role)
         session.add(membership)
     else:
+        if not membership.active:
+            raise HTTPException(
+                status_code=409, detail="Restore suspended membership explicitly first"
+            )
         membership.role = payload.role
     record_audit_event(
         session,
@@ -171,6 +176,39 @@ def add_member(
         resource_id=payload.user_id,
         details={"role": payload.role},
     )
+    session.commit()
+    set_tenant_context(session, tenant_id)
+    session.refresh(membership)
+    return membership
+
+
+@router.patch("/tenants/{tenant_id}/members/{target_user_id}/status",
+              response_model=MembershipResponse)
+def update_member_status(
+    tenant_id: UUID, target_user_id: UUID, payload: MembershipStatusUpdate,
+    user_id: CurrentUserId, session: DatabaseSession,
+) -> Membership:
+    authorize_tenant_action(session, tenant_id=tenant_id, user_id=user_id,
+                           action=Action.MANAGE_MEMBERS)
+    if target_user_id == user_id and not payload.active:
+        raise HTTPException(status_code=409, detail="Administrators cannot suspend themselves")
+    # Serialize changes for a tenant on PostgreSQL and SQLite. Recheck the actor after
+    # the lock: two admins must not concurrently suspend one another using stale access.
+    session.execute(update(Tenant).where(Tenant.id == tenant_id).values(status=Tenant.status))
+    session.expire_all()
+    authorize_tenant_action(session, tenant_id=tenant_id, user_id=user_id,
+                           action=Action.MANAGE_MEMBERS)
+    membership = session.get(Membership, (tenant_id, target_user_id))
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Resource not found or access denied")
+    if membership.active != payload.active:
+        membership.active = payload.active
+        record_audit_event(
+            session, tenant_id=tenant_id, actor_id=user_id,
+            action="membership.restored" if payload.active else "membership.suspended",
+            resource_type="membership", resource_id=target_user_id,
+            details={"active": payload.active},
+        )
     session.commit()
     set_tenant_context(session, tenant_id)
     session.refresh(membership)

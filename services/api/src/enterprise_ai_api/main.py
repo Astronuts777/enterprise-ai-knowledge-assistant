@@ -8,12 +8,15 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Header, Request, Response, status
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from enterprise_ai_api.ai_providers import (
     EmbeddingProvider,
@@ -35,9 +38,15 @@ from enterprise_ai_api.database import (
 )
 from enterprise_ai_api.document_routes import router as document_router
 from enterprise_ai_api.email_delivery import EmailSender, email_sender_from_environment
+from enterprise_ai_api.federation import IdentityTransport, load_providers
+from enterprise_ai_api.federation_routes import _scim_error
+from enterprise_ai_api.federation_routes import router as federation_router
+from enterprise_ai_api.file_scanning import FileScanner, scanner_from_environment
+from enterprise_ai_api.ingestion_routes import router as ingestion_router
 from enterprise_ai_api.object_storage import ObjectStorage, object_storage_from_environment
 from enterprise_ai_api.question_routes import router as question_router
 from enterprise_ai_api.routes import router
+from enterprise_ai_api.scim_groups import router as scim_group_router
 from enterprise_ai_api.tenancy import (
     SESSION_COOKIE_NAME,
     sign_demo_session,
@@ -92,6 +101,7 @@ def create_app(
     session_secret: str | None = None,
     answer_provider: EvidenceAnswerProvider | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    file_scanner: FileScanner | None = None,
 ) -> FastAPI:
     application = FastAPI(
         title="Enterprise AI Knowledge Assistant API",
@@ -116,7 +126,34 @@ def create_app(
     )
     application.state.session_secret = session_secret or os.getenv("SESSION_SECRET", "")
     application.state.public_url = os.getenv("APP_PUBLIC_URL", "http://localhost:3000").rstrip("/")
+    application.state.identity_providers = load_providers()
+    application.state.identity_transport = IdentityTransport()
+    if application.state.identity_providers:
+        from urllib.parse import urlsplit
+
+        public = urlsplit(application.state.public_url)
+        local = (
+            application.state.app_env == "development"
+            and os.getenv("SSO_ALLOW_LOOPBACK_HTTP") == "true"
+            and public.hostname in {"127.0.0.1", "::1"}
+        )
+        if (
+            not application.state.account_auth
+            or not public.hostname
+            or public.path
+            or public.query
+            or public.fragment
+            or public.username
+            or public.password
+            or (public.scheme != "https" and not (local and public.scheme == "http"))
+        ):
+            raise RuntimeError("SSO requires account mode and an HTTPS APP_PUBLIC_URL origin")
     application.state.email_sender = email_sender or email_sender_from_environment()
+    application.state.file_scanner = file_scanner or scanner_from_environment()
+    processing_mode = os.getenv("DOCUMENT_PROCESSING_MODE", "sync")
+    if processing_mode not in {"sync", "async"}:
+        raise RuntimeError("DOCUMENT_PROCESSING_MODE must be sync or async")
+    application.state.async_ingestion = processing_mode == "async"
     application.state.answer_provider = answer_provider or answer_provider_from_environment()
     application.state.local_answer_provider = LocalEvidenceAnswerProvider()
     application.state.embedding_provider = (
@@ -147,10 +184,22 @@ def create_app(
         CORSMiddleware,
         allow_origins=cors_origins_from_environment(),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "X-Dev-User-Id", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
+
+    @application.exception_handler(StarletteHTTPException)
+    async def handle_http_error(request: Request, error: StarletteHTTPException):
+        if request.url.path.startswith("/scim/v2/"):
+            return _scim_error(error.status_code, str(error.detail))
+        return await http_exception_handler(request, error)
+
+    @application.exception_handler(RequestValidationError)
+    async def handle_validation_error(request: Request, error: RequestValidationError):
+        if request.url.path.startswith("/scim/v2/"):
+            return _scim_error(400, "Invalid SCIM request", "invalidValue")
+        return await request_validation_exception_handler(request, error)
 
     @application.middleware("http")
     async def add_security_and_request_tracking(request: Request, call_next) -> Response:
@@ -176,6 +225,10 @@ def create_app(
             )
             raise
         response.headers["X-Request-ID"] = request_id
+        if request.url.path.startswith("/scim/v2/"):
+            response.headers["Cache-Control"] = "no-store"
+            if response.status_code != 204:
+                response.headers["Content-Type"] = "application/scim+json"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -258,8 +311,11 @@ def create_app(
         return SessionResponse(user_id=user_id, mode="public_demo")
 
     application.include_router(auth_router, tags=["authentication"])
+    application.include_router(federation_router, tags=["enterprise-identity"])
+    application.include_router(scim_group_router, tags=["enterprise-identity"])
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
+    application.include_router(ingestion_router, tags=["document-processing"])
     application.include_router(question_router, tags=["knowledge-answers"])
     application.include_router(audit_router, tags=["audit"])
 
@@ -273,4 +329,3 @@ def create_app(
 
 
 app = create_app()
-
