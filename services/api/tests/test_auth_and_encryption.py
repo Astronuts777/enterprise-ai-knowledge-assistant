@@ -476,7 +476,9 @@ def test_enterprise_mfa_policy_blocks_resources_until_member_enrolls() -> None:
     assert allowed.status_code == 200
     assert disable_blocked.status_code == 409
     assert audit.status_code == 200
-    assert audit.json()[0]["details"]["mfa_policy"] == "all"
+    assert {
+        event["details"]["mfa_policy"] for event in audit.json()
+    } == {"admins", "all"}
 
 
 def test_document_content_is_encrypted_in_database_and_file_storage(tmp_path: Path) -> None:

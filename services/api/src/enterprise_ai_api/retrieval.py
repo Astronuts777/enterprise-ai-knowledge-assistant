@@ -99,7 +99,17 @@ def search_published_knowledge(
     normalized_question = _normalize(question)
     ranked: list[RetrievedEvidence] = []
     for chunk, version, document, space in session.execute(statement):
-        lexical_score = _score(normalized_question, query_tokens, chunk.text)
+        content_lexical_score = _score(normalized_question, query_tokens, chunk.text)
+        metadata_lexical_score = (
+            _score(
+                normalized_question,
+                query_tokens,
+                f"{document.title} {version.filename}",
+            )
+            if chunk.position == 1
+            else 0
+        )
+        lexical_score = max(content_lexical_score, metadata_lexical_score)
         semantic_score = _semantic_score(
             query_embedding,
             chunk.embedding,
@@ -166,14 +176,27 @@ def _score(normalized_question: str, query_tokens: set[str], text: str) -> float
         return 0
 
     coverage = len(shared) / len(query_tokens)
-    if len(query_tokens) >= 4 and coverage < 0.2:
+    high_signal_matches = {token for token in shared if _is_high_signal_token(token)}
+    if len(query_tokens) >= 4 and coverage < 0.2 and not high_signal_matches:
         return 0
 
     frequency = sum(min(normalized_text.count(token), 3) for token in shared)
+    identifier_bonus = len(high_signal_matches) * 4
     phrase_bonus = (
         8 if len(normalized_question) >= 4 and normalized_question in normalized_text else 0
     )
-    return round((coverage * 10) + frequency + phrase_bonus, 4)
+    return round((coverage * 10) + frequency + identifier_bonus + phrase_bonus, 4)
+
+
+def _is_high_signal_token(token: str) -> bool:
+    """Recognize order numbers, codes, and other distinctive Latin identifiers."""
+
+    return bool(_LATIN_TOKEN.fullmatch(token)) and (
+        len(token) >= 6
+        or any(character.isdigit() for character in token)
+        or "-" in token
+        or "_" in token
+    )
 
 
 def _semantic_score(

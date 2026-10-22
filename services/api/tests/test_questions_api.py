@@ -93,6 +93,54 @@ def test_published_knowledge_returns_grounded_answer_and_citations(tmp_path: Pat
     assert "直属主管" not in str(question_event["details"])
 
 
+def test_distinctive_order_id_is_not_diluted_by_chinese_question_words(
+    tmp_path: Path,
+) -> None:
+    app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"))
+    with TestClient(app) as test_client:
+        tenant_id, space_id = create_workspace(test_client, ADMIN_A, "Acme")
+        upload_document(
+            test_client,
+            tenant_id,
+            space_id,
+            b"Order RTPNNRS is Confirmed. The shipment is ready for collection.",
+            publish=True,
+        )
+        response = test_client.post(
+            f"/v1/tenants/{tenant_id}/questions",
+            json={"question": "可以为我提供一下Order RTPNNRS的相关内容吗"},
+            headers=headers(ADMIN_A),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "grounded"
+    assert "RTPNNRS" in response.json()["answer"]
+    assert response.json()["citations"][0]["locator"] == "paragraph:1"
+
+
+def test_document_title_can_retrieve_first_published_chunk(tmp_path: Path) -> None:
+    app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"))
+    with TestClient(app) as test_client:
+        tenant_id, space_id = create_workspace(test_client, ADMIN_A, "Acme")
+        upload_document(
+            test_client,
+            tenant_id,
+            space_id,
+            b"Employees receive twenty days of annual paid leave.",
+            publish=True,
+        )
+        response = test_client.post(
+            f"/v1/tenants/{tenant_id}/questions",
+            json={"question": "请概括 Remote work policy 这份文件"},
+            headers=headers(ADMIN_A),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "grounded"
+    assert "annual paid leave" in response.json()["answer"]
+    assert response.json()["citations"][0]["document_title"] == "Remote work policy"
+
+
 def test_ready_document_is_not_searchable_and_refusal_is_saved(tmp_path: Path) -> None:
     app = create_app("sqlite://", storage_root=str(tmp_path / "uploads"))
     with TestClient(app) as test_client:
