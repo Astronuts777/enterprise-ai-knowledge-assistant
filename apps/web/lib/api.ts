@@ -462,6 +462,24 @@ export function listAuditEvents(
   );
 }
 
+export async function downloadAuditExport(
+  actorId: string,
+  tenantId: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(
+    `${API_BASE_URL}/v1/tenants/${tenantId}/audit-events/export.csv`,
+    {
+      cache: "no-store",
+      credentials: "include",
+      headers: { "X-Dev-User-Id": actorId },
+    },
+  );
+  if (!response.ok) throw await apiError(response);
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? "audit-events.csv";
+  return { blob: await response.blob(), filename };
+}
+
 export function saveMember(
   actorId: string,
   tenantId: string,

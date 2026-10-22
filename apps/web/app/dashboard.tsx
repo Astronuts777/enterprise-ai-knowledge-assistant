@@ -24,6 +24,7 @@ import {
   createInvitation,
   createSpace,
   createTenant,
+  downloadAuditExport,
   getCurrentAccount,
   getDocumentContent,
   getTenant,
@@ -105,6 +106,8 @@ const auditActionLabels: Record<string, string> = {
   "document.viewed": "查看文档内容",
   "knowledge.question_answered": "知识问答",
   "authorization.denied": "访问被拒绝",
+  "audit.exported": "导出审计日志",
+  "audit.export_failed": "审计导出失败",
 };
 
 function Icon({ name }: { name: "home" | "assistant" | "spaces" | "members" | "settings" | "plus" | "arrow" | "shield" | "file" | "upload" | "back" | "send" | "quote" }) {
@@ -572,6 +575,29 @@ export default function Dashboard() {
     }
   }
 
+  async function handleExportAudit() {
+    if (!tenantId) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const { blob, filename } = await downloadAuditExport(actorId, tenantId);
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+      setAuditEvents(await listAuditEvents(actorId, tenantId));
+      setNotice("审计 CSV 已安全导出，本次导出操作也已写入审计日志。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法导出审计日志");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function openSettings() {
     if (!ACCOUNT_MODE) return;
     setBusy(true);
@@ -865,7 +891,7 @@ export default function Dashboard() {
             <MembersView members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} />
           )}
           {!mfaBlocked && view === "audit" && actorMembership?.role === "enterprise_admin" && (
-            <AuditView events={auditEvents} />
+            <AuditView events={auditEvents} busy={busy} onExport={handleExportAudit} />
           )}
           {view === "settings" && ACCOUNT_MODE && (
             <AccountSecurityView
@@ -1264,9 +1290,9 @@ function AccountSecurityView({ sessions, busy, mfaEnabled, mfaPolicy, canManageP
   </>;
 }
 
-function AuditView({ events }: { events: AuditEvent[] }) {
+function AuditView({ events, busy, onExport }: { events: AuditEvent[]; busy: boolean; onExport: () => void }) {
   return <>
-    <div className="page-heading"><div><p className="kicker">安全追溯</p><h1>企业审计日志</h1><p>记录关键身份、权限、文档和问答操作。正文、问题、答案、邮箱和令牌不会写入审计元数据。</p></div><span className="assistant-mode"><i />仅企业管理员可见</span></div>
+    <div className="page-heading"><div><p className="kicker">安全追溯</p><h1>企业审计日志</h1><p>记录关键身份、权限、文档和问答操作。正文、问题、答案、邮箱和令牌不会写入审计元数据。</p></div><div className="heading-actions audit-heading-actions"><span className="assistant-mode"><i />仅企业管理员可见</span><button className="secondary-button" disabled={busy} onClick={onExport}><Icon name="file" />导出 CSV</button></div></div>
     {events.length === 0
       ? <section className="empty-state"><span><Icon name="shield" /></span><h2>尚无审计事件</h2><p>后续关键操作会按时间倒序显示在这里。</p></section>
       : <section className="audit-card">

@@ -418,6 +418,7 @@ button { cursor: pointer; }
 .document-heading { margin-bottom: 2rem; }
 .heading-actions { display: flex; gap: 0.65rem; }
 .secondary-button { align-items: center; background: white; border: 1px solid #ccd6d0; border-radius: 0.65rem; color: #526c5d; display: inline-flex; font-size: 0.78rem; font-weight: 750; gap: 0.5rem; padding: 0.75rem 0.9rem; }
+.secondary-button:disabled { cursor: wait; opacity: 0.58; }
 .document-empty { min-height: 390px; }
 .documents-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
 .document-table-head, .document-row { align-items: center; display: grid; grid-template-columns: minmax(280px, 2fr) 0.45fr 0.6fr 0.75fr 0.9fr; padding: 0 1.3rem; }
@@ -559,6 +560,7 @@ button { cursor: pointer; }
 .current-session i { background: #74a659; border-radius: 50%; height: 0.42rem; width: 0.42rem; }
 
 .audit-card { background: white; border: 1px solid var(--line); border-radius: 0.85rem; overflow: hidden; }
+.audit-heading-actions { align-items: center; }
 .audit-table-head, .audit-row { align-items: center; display: grid; gap: 0.8rem; grid-template-columns: minmax(230px, 1.6fr) 0.8fr 1fr 0.55fr 0.85fr; padding: 0 1.3rem; }
 .audit-table-head { background: #f0f3f0; color: #7c8b85; font-size: 0.62rem; font-weight: 800; height: 42px; text-transform: uppercase; }
 .audit-row { border-top: 1px solid #edf0ed; min-height: 76px; }

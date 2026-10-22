@@ -1,9 +1,13 @@
+import csv
+from io import StringIO
 from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from enterprise_ai_api.main import create_app
+from enterprise_ai_api.models import AuditEvent
 
 ADMIN_A = UUID("00000000-0000-0000-0000-00000000000a")
 ADMIN_B = UUID("00000000-0000-0000-0000-00000000000b")
@@ -254,3 +258,69 @@ def test_enterprise_admin_can_review_audit_events_but_member_cannot() -> None:
     denied_events = [event for event in events if event["outcome"] == "denied"]
     assert denied_events
     assert all("Audited Acme" not in str(event["details"]) for event in events)
+
+
+def test_enterprise_admin_can_export_safe_audit_csv_but_member_cannot() -> None:
+    with client() as test_client:
+        tenant = create_tenant(test_client, ADMIN_A, "Exported Acme")
+        test_client.post(
+            f"/v1/tenants/{tenant['id']}/members",
+            json={"user_id": str(MEMBER_A), "role": "member"},
+            headers=headers(ADMIN_A),
+        )
+        with Session(test_client.app.state.engine) as session:
+            session.add(
+                AuditEvent(
+                    tenant_id=UUID(tenant["id"]),
+                    actor_id=ADMIN_A,
+                    action="=DANGEROUS_FORMULA()",
+                    resource_type="+spreadsheet",
+                    resource_id="@external",
+                    outcome="success",
+                    details={"safe": True},
+                )
+            )
+            session.commit()
+
+        member_export = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events/export.csv",
+            headers=headers(MEMBER_A),
+        )
+        admin_export = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events/export.csv?outcome=success",
+            headers=headers(ADMIN_A),
+        )
+        export_audit = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events?action=audit.exported",
+            headers=headers(ADMIN_A),
+        )
+
+    assert member_export.status_code == 403
+    assert admin_export.status_code == 200
+    assert admin_export.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=" in admin_export.headers["content-disposition"]
+    assert admin_export.headers["cache-control"] == "no-store"
+    rows = list(csv.DictReader(StringIO(admin_export.content.decode("utf-8-sig"))))
+    dangerous = next(row for row in rows if "DANGEROUS_FORMULA" in row["action"])
+    assert dangerous["action"].startswith("'=")
+    assert dangerous["resource_type"].startswith("'+")
+    assert dangerous["resource_id"].startswith("'@")
+    assert export_audit.status_code == 200
+    assert export_audit.json()[0]["details"]["row_count"] == len(rows)
+    assert export_audit.json()[0]["details"]["filtered_by_outcome"] is True
+
+
+def test_audit_export_rejects_inverted_time_range() -> None:
+    with client() as test_client:
+        tenant = create_tenant(test_client, ADMIN_A, "Time bounded Acme")
+        response = test_client.get(
+            f"/v1/tenants/{tenant['id']}/audit-events/export.csv",
+            params={
+                "from": "2026-10-22T10:00:00Z",
+                "to": "2026-10-21T10:00:00Z",
+            },
+            headers=headers(ADMIN_A),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The 'from' timestamp must be earlier than 'to'"
