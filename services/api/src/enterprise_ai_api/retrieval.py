@@ -7,8 +7,8 @@ import unicodedata
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, literal, or_, select
+from sqlalchemy.orm import Session, defer
 
 from enterprise_ai_api.models import Document, DocumentChunk, DocumentVersion, Space
 
@@ -68,12 +68,24 @@ class RetrievedEvidence:
     classification: str
 
 
-def _rank_key(item: RetrievedEvidence) -> tuple[float, str, int, str]:
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    chunk_id: UUID
+    version_id: UUID
+    document_id: UUID
+    title: str
+    position: int
+    score: float
+    lexical_score: float
+    semantic_score: float | None
+
+
+def _rank_key(item: _Candidate) -> tuple[float, str, int, str]:
     # Stable tie-breaking must not depend on DB row order or fetch batch size.
-    return (-item.score, item.document.title, item.chunk.position, str(item.chunk.id))
+    return (-item.score, item.title, item.position, str(item.chunk_id))
 
 
-def _retain_best(items: list[RetrievedEvidence], item: RetrievedEvidence) -> None:
+def _retain_best(items: list[_Candidate], item: _Candidate) -> None:
     items.append(item)
     items.sort(key=_rank_key)
     del items[MAX_ANCHORS:]
@@ -94,8 +106,19 @@ def search_published_knowledge(
     if not query_tokens and query_embedding is None:
         return []
 
+    # Only matching-model vectors are needed for scoring. The CASE expression
+    # retains EncryptedText's result processor; never cast ciphertext to plaintext.
+    vector_column = (
+        case((DocumentChunk.embedding_model == embedding_model, DocumentChunk.embedding))
+        if query_embedding is not None and embedding_model is not None else literal(None)
+    )
     statement = (
-        select(DocumentChunk, DocumentVersion, Document, Space)
+        select(
+            DocumentChunk.id, DocumentChunk.document_version_id, Document.id,
+            Document.title, DocumentChunk.position, DocumentVersion.filename,
+            DocumentChunk.text, vector_column, DocumentChunk.embedding_model,
+        )
+        .select_from(DocumentChunk)
         .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
         .join(Document, Document.id == DocumentVersion.document_id)
         .join(Space, Space.id == Document.space_id)
@@ -113,39 +136,42 @@ def search_published_knowledge(
         statement = statement.where(Document.space_id.in_(space_ids))
 
     normalized_question = _normalize(question)
-    best_chunks: list[RetrievedEvidence] = []
-    best_documents: list[RetrievedEvidence] = []
+    query_norm = (
+        math.sqrt(sum(value * value for value in query_embedding))
+        if query_embedding is not None else None
+    )
+    best_chunks: list[_Candidate] = []
+    best_documents: list[_Candidate] = []
     # No corpus-size cutoff: SQL applies authorization/publication filters before
-    # encrypted fields are loaded. Streaming bounds ORM/driver buffering, while
-    # two top-k lists bound retained matches even when every chunk is relevant.
+    # encrypted fields are loaded. Scalar rows avoid ORM objects for the corpus;
+    # only IDs/scores are retained and excerpts are delayed until after ranking.
     with session.execute(statement.execution_options(yield_per=RETRIEVAL_BATCH_SIZE)) as rows:
-        for chunk, version, document, space in rows:
-            content_lexical_score = _score(normalized_question, query_tokens, chunk.text)
+        for (
+            chunk_id, version_id, document_id, title, position, filename, body, vector, model,
+        ) in rows:
+            content_lexical_score = _score(normalized_question, query_tokens, body)
             metadata_lexical_score = (
-                _score(normalized_question, query_tokens, f"{document.title} {version.filename}")
-                if chunk.position == 1 else 0
+                _score(normalized_question, query_tokens, f"{title} {filename}")
+                if position == 1 else 0
             )
             lexical_score = max(content_lexical_score, metadata_lexical_score)
             semantic_score = _semantic_score(
-                query_embedding, chunk.embedding,
-                query_model=embedding_model, chunk_model=chunk.embedding_model,
+                query_embedding, vector,
+                query_model=embedding_model, chunk_model=model, query_norm=query_norm,
             )
             score = _hybrid_score(lexical_score, semantic_score)
             if score is None:
                 continue
-            item = RetrievedEvidence(
-                chunk=chunk,
-                version=version,
-                document=document,
+            item = _Candidate(
+                chunk_id=chunk_id, version_id=version_id, document_id=document_id,
+                title=title, position=position,
                 score=score,
-                excerpt=_best_excerpt(chunk.text, query_tokens),
                 lexical_score=lexical_score,
                 semantic_score=semantic_score,
-                classification=space.classification,
             )
             _retain_best(best_chunks, item)
             existing = next((entry for entry in best_documents
-                             if entry.document.id == document.id), None)
+                             if entry.document_id == document_id), None)
             if existing is None:
                 _retain_best(best_documents, item)
             elif _rank_key(item) < _rank_key(existing):
@@ -154,30 +180,48 @@ def search_published_knowledge(
 
     # Reserve one anchor per document, then fill unused slots with global top-k.
     anchors = list(best_documents)
-    anchor_ids = {item.chunk.id for item in anchors}
+    anchor_ids = {item.chunk_id for item in anchors}
     for item in best_chunks:
         if len(anchors) == MAX_ANCHORS:
             break
-        if item.chunk.id not in anchor_ids:
+        if item.chunk_id not in anchor_ids:
             anchors.append(item)
-            anchor_ids.add(item.chunk.id)
+            anchor_ids.add(item.chunk_id)
     if not anchors:
         return []
-    selected = list(anchors)
-    selected_ids = {item.chunk.id for item in selected}
-    # Fetch only the at-most-eight adjacent positions, with exactly the same
-    # tenant/space/publication predicates. Close the scan cursor before this query.
+    # Hydrate at most four anchors plus eight adjacent positions, after closing
+    # the scan cursor. Reuse every SQL scope predicate, including publication.
+    # Vectors are not evidence and must not be fetched/decrypted in this phase.
     neighbor_positions = [and_(
-        DocumentChunk.document_version_id == anchor.version.id,
-        DocumentChunk.position.in_([anchor.chunk.position - 1, anchor.chunk.position + 1]),
+        DocumentChunk.document_version_id == anchor.version_id,
+        DocumentChunk.position.in_([anchor.position - 1, anchor.position + 1]),
     ) for anchor in anchors]
+    evidence_statement = statement.with_only_columns(
+        DocumentChunk, DocumentVersion, Document, Space,
+    ).where(or_(DocumentChunk.id.in_(anchor_ids), *neighbor_positions)).options(
+        defer(DocumentChunk.embedding, raiseload=True),
+    ).execution_options(populate_existing=True)
+    with session.execute(evidence_statement) as rows:
+        hydrated = {chunk.id: (chunk, version, document, space)
+                    for chunk, version, document, space in rows}
     neighbors = {(chunk.document_version_id, chunk.position): (chunk, version, document, space)
-                 for chunk, version, document, space in session.execute(
-                     statement.where(or_(*neighbor_positions))
-                 )}
+                 for chunk, version, document, space in hydrated.values()}
+    selected = []
+    # A version may have been withdrawn during the scan; do not return it or
+    # expand its context if it is absent from the freshly scoped evidence query.
+    anchors = [anchor for anchor in anchors if anchor.chunk_id in hydrated]
+    for anchor in anchors:
+        chunk, version, document, space = hydrated[anchor.chunk_id]
+        selected.append(RetrievedEvidence(
+            chunk=chunk, version=version, document=document, score=anchor.score,
+            excerpt=_best_excerpt(chunk.text, query_tokens),
+            lexical_score=anchor.lexical_score, semantic_score=anchor.semantic_score,
+            classification=space.classification,
+        ))
+    selected_ids = {item.chunk.id for item in selected}
     for offset in (1, -1):
         for anchor in anchors:
-            neighbor = neighbors.get((anchor.version.id, anchor.chunk.position + offset))
+            neighbor = neighbors.get((anchor.version_id, anchor.position + offset))
             if neighbor is None or neighbor[0].id in selected_ids:
                 continue
             chunk, version, document, space = neighbor
@@ -261,6 +305,7 @@ def _semantic_score(
     *,
     query_model: str | None,
     chunk_model: str | None,
+    query_norm: float | None = None,
 ) -> float | None:
     if (
         query_embedding is None
@@ -280,7 +325,8 @@ def _semantic_score(
         left * right
         for left, right in zip(query_embedding, chunk_embedding, strict=True)
     )
-    query_norm = math.sqrt(sum(value * value for value in query_embedding))
+    if query_norm is None:
+        query_norm = math.sqrt(sum(value * value for value in query_embedding))
     chunk_norm = math.sqrt(sum(value * value for value in chunk_embedding))
     if query_norm == 0 or chunk_norm == 0:
         return None

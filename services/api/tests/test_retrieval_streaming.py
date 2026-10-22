@@ -6,14 +6,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import insert, select, text
+from sqlalchemy import Text, cast, insert, literal, select, text, update
 from sqlalchemy.engine import make_url
 from test_questions_api import ADMIN_A, ADMIN_B, create_workspace, headers, upload_document
 
 from enterprise_ai_api import retrieval
 from enterprise_ai_api.database import set_tenant_context
 from enterprise_ai_api.main import create_app
-from enterprise_ai_api.models import DocumentChunk
+from enterprise_ai_api.models import DocumentChunk, DocumentVersion
 
 
 @pytest.fixture
@@ -110,7 +110,9 @@ def test_large_corpus_api_answer_and_source_navigation(corpus):
 def test_all_matching_chunks_are_scored_with_bounded_retention(corpus, monkeypatch):
     app, _, tenant, space, _, _ = corpus
     sizes = []
+    excerpts = []
     original = retrieval._score
+    original_excerpt = retrieval._best_excerpt
     with app.state.session_factory() as session:
         from enterprise_ai_api.database import set_tenant_context
 
@@ -120,7 +122,12 @@ def test_all_matching_chunks_are_scored_with_bounded_retention(corpus, monkeypat
             sizes.append(len(session.identity_map))
             return original(*args)
 
+        def tracked_excerpt(*args):
+            excerpts.append(1)
+            return original_excerpt(*args)
+
         monkeypatch.setattr(retrieval, "_score", tracked)
+        monkeypatch.setattr(retrieval, "_best_excerpt", tracked_excerpt)
         result = retrieval.search_published_knowledge(
             session,
             tenant_id=tenant,
@@ -128,9 +135,9 @@ def test_all_matching_chunks_are_scored_with_bounded_retention(corpus, monkeypat
             question="Routine unrelated material",
         )
         assert len(sizes) == 5012  # 5,011 bodies plus one metadata comparison
-        # ORM may retain the prior batch while constructing the next one, but
-        # never all 5,011 chunks, including when virtually every row matches.
-        assert max(sizes) < retrieval.RETRIEVAL_BATCH_SIZE * 3
+        # Scalar scoring creates no ORM objects or excerpts, even with all hits.
+        assert max(sizes) == 0
+        assert len(excerpts) == len(result) <= retrieval.MAX_CITATIONS
         assert len(result) <= retrieval.MAX_CITATIONS
         assert [item.chunk.position for item in result[:4]] == [2, 3, 4, 5]
 
@@ -270,3 +277,87 @@ def test_interrupted_scan_closes_cursor_without_returning_partial_answer(corpus,
             )
         assert len(cursors) == 1
         assert cursors[0].closed
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+def test_unneeded_vectors_are_not_decrypted_even_for_selected_evidence(corpus, semantic):
+    app, _, tenant, space, _, first_id = corpus
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        # First chunk is an anchor, second is context, the others are scanned.
+        # Every vector is corrupted but belongs to a different model. Loading
+        # these encrypted fields anywhere would fail, not just affect ranking.
+        session.execute(update(DocumentChunk).where(DocumentChunk.tenant_id == tenant).values(
+            embedding=literal("enc:v1:aW52YWxpZA==", type_=Text),
+        ))
+        session.commit()
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        result = retrieval.search_published_knowledge(
+            session, tenant_id=tenant, space_ids=[space], question="ZX-987",
+            query_embedding=[1, 0] if semantic else None,
+            embedding_model="different-model" if semantic else None,
+        )
+        assert result[0].chunk.id == first_id
+        assert [item.chunk.position for item in result] == [1, 2]
+        assert all(item.semantic_score is None for item in result)
+
+
+def test_matching_corrupt_vector_still_fails_closed(corpus):
+    app, _, tenant, space, _, _ = corpus
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        session.execute(update(DocumentChunk).where(DocumentChunk.tenant_id == tenant).values(
+            embedding=literal("enc:v1:aW52YWxpZA==", type_=Text),
+        ))
+        session.commit()
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        with pytest.raises(ValueError, match="Encrypted payload header"):
+            retrieval.search_published_knowledge(
+                session, tenant_id=tenant, space_ids=[space], question="ZX-987",
+                query_embedding=[1, 0], embedding_model="test-vector",
+            )
+
+
+def test_withdrawal_between_scoring_and_hydration_returns_no_stale_evidence(corpus, monkeypatch):
+    app, _, tenant, space, version_id, _ = corpus
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        execute = session.execute
+        calls = 0
+
+        def withdraw_before_hydration(statement, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                execute(update(DocumentVersion).where(
+                    DocumentVersion.id == version_id,
+                ).values(status="ready"))
+                session.commit()
+                set_tenant_context(session, tenant)
+            return execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", withdraw_before_hydration)
+        assert retrieval.search_published_knowledge(
+            session, tenant_id=tenant, space_ids=[space], question="ZX-987",
+        ) == []
+
+
+def test_retrieval_does_not_rewrite_encrypted_storage(corpus):
+    app, _, tenant, space, _, first_id = corpus
+    with app.state.session_factory() as session:
+        set_tenant_context(session, tenant)
+        ciphertext = select(
+            cast(DocumentChunk.text, Text), cast(DocumentChunk.embedding, Text),
+        ).where(DocumentChunk.id == first_id)
+        before = session.execute(ciphertext).one()
+        assert all(value.startswith("enc:v1:") for value in before)
+        assert "Archive" not in before[0]
+        retrieval.search_published_knowledge(
+            session, tenant_id=tenant, space_ids=[space], question="ZX-987",
+            query_embedding=[1, 0], embedding_model="test-vector",
+        )
+        session.commit()
+        set_tenant_context(session, tenant)
+        assert session.execute(ciphertext).one() == before
