@@ -15,7 +15,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from enterprise_ai_api.retrieval import RetrievedEvidence, build_grounded_answer
+from enterprise_ai_api.retrieval import (
+    RetrievedEvidence,
+    build_grounded_answer,
+    select_local_answer_evidence,
+)
 
 MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_GENERATED_ANSWER_CHARS = 6000
@@ -69,7 +73,7 @@ class LocalEvidenceAnswerProvider:
     model_name = None
 
     def generate(self, *, question: str, evidence: list[RetrievedEvidence]) -> AnswerDraft:
-        del question
+        evidence = select_local_answer_evidence(question, evidence)
         text, answer_status = build_grounded_answer(evidence)
         return AnswerDraft(
             text=text,

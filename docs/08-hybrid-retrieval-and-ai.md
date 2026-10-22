@@ -109,6 +109,26 @@ BENCHMARK_RETRIEVAL=1 .venv/bin/pytest services/api/tests/test_retrieval_perform
 
 本地模式不生成新事实，只拼接相关原文摘录。两种模式在证据不足时都明确拒答。
 
+### 本地回答的相关引用筛选
+
+检索上下文与最终展示分离：`LocalEvidenceAnswerProvider` 调用请求内的
+`select_local_answer_evidence`，不修改原始候选，不引入持久缓存。全文扫描和原有模型路径不变。
+
+- 过滤纯 Markdown 标题（ATX/Setext）与分隔符；按正文重新评分，不把标题/文件名命中分数当作正文相关度。
+- 保留接近最强正文得分的片段，或覆盖问题中尚未覆盖关键词的补充段落；保留达到门槛的纯语义命中。
+- 无正文/语义命中时，文档元数据命中仍可回退到正文预览，纯标题本身不能构成答案。
+- 仅对白空格归一后完全相同的摘录去重，保留大小写不同的标识符、不同数值或否定规定。
+- 默认最多 3 段、累计 1,200 字符软预算；首个较长的现有摘录可单独保留。不要为了满足预算拼接或截断句子。
+- 在已检索的相邻片段内，识别明确的例外/条件开头，以及短主题段后的解释，必要时超出软预算。
+  这是保守启发式，不保证识别全部语言或所有跨段关系；此前检索摘录的长文本窗口限制仍然存在。
+- 最终引用连续编号，正文摘录、持久化引用、历史与原文高亮使用同一组片段。引用阅读、生成后权限/发布复核不变。
+
+前端使用原生 `details/summary` 折叠引用摘录，保留文件、版本、段落和原文入口；键盘可以展开，
+不是隐藏引用来源。既有历史内容不重写，新问题才使用新筛选规则。
+`test_concise_answers.py` 覆盖演示问题的一条引用、标题拒答、精确去重、多文档补充与相反规定、
+相邻例外、无关键词语义命中、文件名回退、长度预算、历史一致和原文定位。
+这轮没有启用线上大模型或文件扫描，不把精简展示当作回答质量全面提升。
+
 结构化输出和嵌入请求分别参照 OpenAI 官方的
 [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 与 [Embeddings API](https://developers.openai.com/api/reference/python/resources/embeddings/methods/create)。

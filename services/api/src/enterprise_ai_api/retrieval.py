@@ -16,6 +16,15 @@ RETRIEVAL_BATCH_SIZE = 256
 MAX_ANCHORS = 4
 MAX_CITATIONS = 8
 MAX_EXCERPT_CHARS = 1200
+MAX_LOCAL_PASSAGES = 3
+LOCAL_EXCERPT_BUDGET = 1200
+
+_HEADING_LINE = re.compile(r"^(?:#{1,6}\s+.+|[-=*_]{3,})$")
+_QUALIFIER_START = re.compile(
+    r"^(?:但|但是|不过|然而|除非|除外|例外|除.*外|仅限|仅当|否则|注意[：:]|"
+    r"未经|不得|不适用|前提|条件[：:]|however\b|except\b|unless\b|only\b|"
+    r"provided\b|subject to\b|not applicable\b|do not\b)", re.IGNORECASE,
+)
 
 _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _CHINESE_SEQUENCE = re.compile(r"[\u3400-\u9fff]+")
@@ -236,6 +245,93 @@ def search_published_knowledge(
     return selected
 
 
+def select_local_answer_evidence(
+    question: str, evidence: list[RetrievedEvidence],
+) -> list[RetrievedEvidence]:
+    """Distinguish retrieval context from passages worth displaying as an answer.
+
+    Selection is request-local and only consumes already-authorized evidence.
+    Do not summarize, splice sentences, or remove conditions from a passage.
+    Model providers still receive the complete retrieval context.
+    """
+    tokens = _tokens(_QUERY_FILLER.sub(" ", question))
+    normalized = _normalize(question)
+    passages = []
+    for item in evidence:
+        lines = [line.strip() for line in item.excerpt.splitlines() if line.strip()]
+        if not lines or all(_HEADING_LINE.fullmatch(line) for line in lines) or (
+            len(lines) == 2 and re.fullmatch(r"[-=]{3,}", lines[1])
+        ):
+            continue
+        lexical = _score(normalized, tokens, item.excerpt)
+        shared = tokens & _tokens(item.excerpt)
+        passages.append((item, lexical, shared))
+
+    best_lexical = max((score for _, score, _ in passages), default=0)
+    best_semantic = max((item.semantic_score or 0 for item, _, _ in passages), default=0)
+    # Metadata-only document lookups can still show a body excerpt. A title
+    # alone is never an answer. Do not use this fallback if a body match exists.
+    metadata_versions = {item.version.id for item in evidence if item.lexical_score > 0}
+    passages.sort(key=lambda row: (
+        -row[1], -(row[0].semantic_score or 0), -row[0].score,
+        row[0].document.title, row[0].chunk.position, str(row[0].chunk.id),
+    ))
+    selected: list[RetrievedEvidence] = []
+    covered: set[str] = set()
+    seen: set[str] = set()
+    used_chars = 0
+    for item, lexical, shared in passages:
+        semantic_match = (
+            item.semantic_score is not None
+            and item.semantic_score >= max(0.35, best_semantic * 0.8)
+        )
+        lexical_match = lexical > 0 and (
+            lexical >= best_lexical * 0.65
+            or (bool(shared - covered) and lexical >= best_lexical * 0.25)
+        )
+        metadata_match = (
+            best_lexical == 0 and best_semantic < 0.35
+            and item.version.id in metadata_versions
+        )
+        if not (lexical_match or semantic_match or metadata_match):
+            continue
+        key = " ".join(item.excerpt.split())
+        if key in seen:
+            continue
+        if len(selected) >= MAX_LOCAL_PASSAGES:
+            break
+        if selected and used_chars + len(item.excerpt) > LOCAL_EXCERPT_BUDGET:
+            continue
+        selected.append(item)
+        covered.update(shared)
+        seen.add(key)
+        used_chars += len(item.excerpt)
+
+    # Explicit adjacent exceptions/conditions must not disappear merely to meet
+    # a brevity budget. Preserve them verbatim, in source order, with their own
+    # citations; the bounded retrieval set remains the absolute limit.
+    anchors = list(selected)
+    for item, _, _ in passages:
+        key = " ".join(item.excerpt.split())
+        if key in seen:
+            continue
+        anchor = next((entry for entry in anchors if entry.version.id == item.version.id
+                       and abs(entry.chunk.position - item.chunk.position) == 1
+                       and (
+                           _QUALIFIER_START.match(item.excerpt.lstrip())
+                           or (item.chunk.position == entry.chunk.position + 1
+                               and len(entry.excerpt) <= 80
+                               and _tokens(entry.excerpt) <= tokens
+                               and not re.search(r"\d|[。!?！？;；]", entry.excerpt))
+                       )), None)
+        if anchor is None:
+            continue
+        index = selected.index(anchor) + (item.chunk.position > anchor.chunk.position)
+        selected.insert(index, item)
+        seen.add(key)
+    return selected
+
+
 def build_grounded_answer(evidence: list[RetrievedEvidence]) -> tuple[str, str]:
     if not evidence:
         return (
@@ -245,7 +341,7 @@ def build_grounded_answer(evidence: list[RetrievedEvidence]) -> tuple[str, str]:
         )
 
     statements = [f"{item.excerpt} [{index}]" for index, item in enumerate(evidence, start=1)]
-    return "根据已发布的企业资料：\n\n" + "\n\n".join(statements), "grounded"
+    return "相关原文节选（完整上下文见引用）：\n\n" + "\n\n".join(statements), "grounded"
 
 
 def _normalize(value: str) -> str:

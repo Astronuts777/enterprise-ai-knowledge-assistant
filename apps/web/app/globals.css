@@ -499,6 +499,8 @@ button { cursor: pointer; }
 .citations blockquote b { font-size: 0.68rem; }
 .citations blockquote small { color: #84918c; font-size: 0.58rem; }
 .citations blockquote p { color: #56675f; font-size: 0.66rem; line-height: 1.6; margin: 0.35rem 0 0; }
+.citation-excerpt summary { color: #56675f; cursor: pointer; font-size: 0.66rem; margin-top: 0.35rem; }
+.citation-excerpt summary:focus-visible { outline: 2px solid #365a35; outline-offset: 3px; }
 .citation-source-button { justify-self: start; background: white; border: 1px solid #c8d9c1; color: #365a35; border-radius: 6px; padding: 7px 10px; margin-top: 6px; font: inherit; font-size: 0.68rem; cursor: pointer; }
 .citation-source-button:focus-visible { outline: 2px solid #365a35; outline-offset: 2px; }
 .citation-source-button:disabled { cursor: wait; opacity: 0.55; }
