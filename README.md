@@ -7,11 +7,15 @@
 - **API 文档（本地）**：[http://localhost:8000/docs](http://localhost:8000/docs)
 - **Web（本地）**：[http://localhost:3000](http://localhost:3000)
 
-> **当前推荐：用户在自己的电脑上运行完整本地版。** 不需要购买云服务器、对象存储或模型 API，
+> **个人体验：在自己的电脑上运行完整本地版。** 不需要购买云服务器、对象存储或模型 API，
 > 也不需要配置付费 API 密钥。首次安装需联网下载依赖和模型，运行消耗自己的硬件、电力和磁盘空间。
 > 请从下面的[本地 AI 配置指南](#local-ai-setup)开始；普通使用无需启动 Docker 或创建 Render 资源。
 >
 > 公开地址仅作免费演示，不是正式生产系统，也不会调用访问者电脑里的模型。请勿上传真实机密资料。
+
+> **企业多人共享：由管理员统一部署，员工只用浏览器。** 请阅读[企业内部统一部署](#enterprise-deployment)
+> 和[员工使用指南](#employee-guide)。这是需 IT 配置和实机验收的手动部署参考，不是已经交付的一键企业安装器。
+> 本次文档更新不改变个人模式、不启动内网服务，也不把 Render 演示环境升级为企业生产环境。
 
 ## 这个 Web 可以做什么
 
@@ -125,7 +129,8 @@ pnpm-lock.yaml                    锁定的前端依赖
 - Node.js 22；
 - pnpm 11.25.0；
 - Git；
-- Docker Desktop（仅在使用 PostgreSQL 和 MinIO 时需要）。
+- 容器运行时（仅在使用容器版 PostgreSQL 和 MinIO 时需要；Linux 可使用 Docker Engine，
+  不要求购买 Docker Desktop，企业使用 Desktop 前须核对其许可）。
 
 如果终端提示 `pnpm: command not found`：
 
@@ -827,6 +832,314 @@ API：`POST /v1/tenants/{tenant_id}/document-versions/{version_id}/unpublish`；
 
 API：`GET /v1/tenants/{tenant_id}/questions/{answer_id}/citations/{citation_number}/source`。
 不新增付费服务、数据库迁移或模型依赖。自动化测试：`services/api/tests/test_citation_sources.py`。
+
+<a id="enterprise-deployment"></a>
+
+## 企业内部统一部署（管理员指南）
+
+### 1. 先选对使用模式和费用边界
+
+| 模式 | 安装者与安装位置 | 员工访问什么 | 数据是否共享 |
+| --- | --- | --- | --- |
+| 个人本机版 | 每位体验者在自己的电脑安装全部依赖和模型 | 自己电脑上的 `http://127.0.0.1:8201` | 各自独立，不自动同步 |
+| 企业内网版 | IT 在一台受控、持续在线的设备部署完整服务 | 管理员提供的统一 HTTPS 地址 | 同一企业实例，按账号和空间权限共享 |
+| Render 演示 | 本项目的公共演示环境 | README 顶部的公开地址 | 与企业内网实例分离，不用于真实机密资料 |
+
+企业内网版可不购买云服务器、不调用付费模型 API、不新增软件订阅；设备、电力、网络、备份介质和维护仍由企业承担。
+首次安装依赖、模型和安全更新需要下载；模型及依赖须核对商用许可。员工不需要安装 Git、Python、Node、pnpm 或 Ollama。
+已有企业 SMTP、身份服务、VPN 可以复用；没有这些服务时不能声称邮件、SSO 或远程访问已经可用。
+
+下面以 **Linux 主机原生运行应用、Worker 和 Ollama，PostgreSQL 保存数据，Caddy 提供 HTTPS** 为参考。
+选择原生运行是为了匹配当前模型/扫描适配器的回环地址限制，不代表 Windows/macOS 无法部署。
+Windows/WSL、macOS 常驻服务和企业网络尚需单独配置、验收，不能直接套用下面的 systemd 示例。
+
+**现状说明：** 已有应用组件可由管理员手动组合；尚无完整企业 Compose 包、自动配置向导或已验收的企业安装器。
+`infra/docker-compose.yml` 是带开发口令和端口映射的开发环境，不能直接用于企业；当前 `Dockerfile` 也没有打包完整的 Worker 部署。
+`scripts/local_ai.py start/web` 会设置开发模式、本机访问地址和关闭邮件等选项，不应拿来替代企业服务配置。
+本节为对照代码编写的部署参考，未在企业 Linux 主机、真实 SMTP/IdP、多人并发环境完成端到端验收。
+
+### 2. 管理员准备设备、网络和目录
+
+1. 指定服务器和运维负责人；安排固定内网 IP 或 DHCP 地址保留，关闭自动休眠，并规划故障处理时间。
+   模型、OCR、扫描器和多人访问会共同消耗内存；按实际设备做容量测试，不承诺固定并发人数。
+2. 选择统一入口，例如 `https://192.168.1.50`。这里的 IP 只是示例，必须替换为企业设备的实际地址。
+   有内部 DNS 时也可使用企业自己的主机名；浏览器、邀请链接和 `APP_PUBLIC_URL` 必须一致。
+3. 由 IT 创建非 root 服务账号（下文称 `enterprise-ai`），并预先准备以下目录。路径均为示例：
+
+   | 路径 | 内容与权限要求 |
+   | --- | --- |
+   | `/srv/enterprise-ai` | 程序及虚拟环境；发布由管理员控制，员工不能写入 |
+   | `/srv/enterprise-ai-data/uploads` | 加密原件；API 和 Worker 可读写，不在 Web 静态目录内 |
+   | `/srv/enterprise-ai-models` | 模型缓存；供模型服务账号使用 |
+   | `/etc/enterprise-ai/runtime.env` | 运行配置和密钥；仅 root/服务账号可读，不放入仓库 |
+   | 独立备份介质或受控备份服务器 | 数据库、原件、配置与密钥的受保护备份，不是同盘另一文件夹 |
+
+4. 安装项目要求的 Python、Node.js、pnpm、Git；需要 OCR 时安装 Poppler、Tesseract 及中英文语言包。
+   安装 PostgreSQL、Ollama、Caddy；启用上传扫描时安装并更新 ClamAV。版本和安装渠道由 IT 审核。
+5. 防火墙只允许企业可信网段访问 HTTPS 入口；数据库、模型、扫描器、API 内部端口不开放给员工或公网。
+   不要为此开启路由器公网端口转发。公司访客 Wi-Fi 可能与办公网隔离，不能假设所有 Wi-Fi 都能访问。
+
+### 3. 在服务器安装应用并准备 PostgreSQL
+
+确认 `/srv/enterprise-ai` 尚无已有业务实例后，安装到该位置；已有实例请走后面的升级流程，不覆盖旧数据：
+
+```bash
+git clone https://github.com/Astronuts777/enterprise-ai-knowledge-assistant.git /srv/enterprise-ai
+cd /srv/enterprise-ai
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.lock
+pnpm install --frozen-lockfile
+pnpm build:local-ai
+```
+
+这些命令由有目标目录写权限的部署账号执行，不要用 root 运行整个应用。`build:local-ai` 生成同源账号版静态网页，
+后端同时提供网页和 API；员工无需连接 3000/8000 两个开发端口，也不使用 `pnpm dev:web`。
+
+PostgreSQL 由数据库管理员准备独立数据库、迁移账号和运行账号：
+
+- 数据库监听本机回环或受控私网；使用独立随机口令，不使用开发 Compose 的预设口令。
+- `MIGRATION_DATABASE_URL` 供迁移账号建表/升级；不要把这个高权限凭据留在日常 API/Worker 环境中。
+- `DATABASE_URL` 使用最小权限运行账号，不能是超级用户或具有 `BYPASSRLS` 权限的角色。
+- 迁移后由 DBA 授予运行账号必要的 schema、表、序列访问权限；遵守追加式审计约束，不授予任意 DDL 权限。
+  不要为了消除权限报错改用超级用户，应先检查授权及 RLS；每次新增表后重新核对运行权限。
+- 下文连接串是占位示例；密码内特殊字符须正确进行 URL 编码。数据库创建、账号授权和备份权限不是应用自动完成的。
+
+### 4. 在同一台服务器运行本地模型
+
+由 IT 安装 Ollama，并在**模型服务自身的环境**中设置以下内容；修改后需重启该服务：
+
+```dotenv
+OLLAMA_HOST=127.0.0.1:11435
+OLLAMA_NO_CLOUD=1
+OLLAMA_MODELS=/srv/enterprise-ai-models
+```
+
+模型服务账号必须能写入模型目录。首次下载，在服务器执行：
+
+```bash
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen3:4b
+OLLAMA_HOST=127.0.0.1:11435 ollama pull bge-m3
+curl --fail http://127.0.0.1:11435/api/tags
+```
+
+两个模型均出现后，再用合成资料验收实际生成和嵌入。上述命令不启动后台模型服务，必须先由 IT 启动 `ollama serve`
+并配置服务管理器；不要与个人启动器重复占用端口。服务环境配置见 [Ollama 官方 FAQ](https://docs.ollama.com/faq)。
+
+当前应用的 Ollama 地址只接受回环地址，并关闭代理/跳转。因此这里要求 API、Worker、Ollama 位于同一主机网络环境。
+不能把地址直接改成 `http://ollama:11434`、另一台机器 IP 或普通 Docker 容器服务名就宣称可用；
+容器中的 `127.0.0.1` 也不是宿主机。跨主机模型部署不在本参考方案范围内。员工从不直接访问模型端口。
+
+### 5. 设置应用运行环境、扫描与邮件
+
+管理员用受控编辑器创建 `/etc/enterprise-ai/runtime.env`，限制为服务账号可读的权限，例如 `0600`。
+下列内容必须替换占位值后使用；格式为 `KEY=value`，不是自动读取的项目 `.env`，不要提交 Git 或发到聊天里。
+
+```dotenv
+APP_ENV=production
+ACCOUNT_AUTH_MODE=true
+PUBLIC_DEMO_MODE=false
+APP_PUBLIC_URL=https://192.168.1.50
+CORS_ORIGINS=https://192.168.1.50
+DATABASE_URL=postgresql+psycopg://enterprise_runtime:REPLACE_URL_ENCODED_PASSWORD@127.0.0.1:5432/enterprise_ai
+ENCRYPTION_MASTER_KEY=REPLACE_WITH_PRIVATE_RANDOM_KEY
+OBJECT_STORAGE_BACKEND=local
+LOCAL_STORAGE_PATH=/srv/enterprise-ai-data/uploads
+WEB_STATIC_DIR=/srv/enterprise-ai/apps/web/out
+PYTHONPATH=/srv/enterprise-ai/services/api/src:/srv/enterprise-ai/packages/core/src:/srv/enterprise-ai/services/worker/src
+AI_PROVIDER=ollama
+EMBEDDING_PROVIDER=ollama
+AI_MODEL=qwen3:4b
+EMBEDDING_MODEL=bge-m3
+OLLAMA_BASE_URL=http://127.0.0.1:11435
+OLLAMA_TIMEOUT_SECONDS=180
+AI_ALLOW_RESTRICTED=false
+DOCUMENT_PROCESSING_MODE=async
+FILE_SCAN_BACKEND=clamav
+FILE_SCAN_REQUIRED=true
+CLAMAV_HOST=127.0.0.1
+CLAMAV_PORT=3310
+REQUIRE_EMAIL_VERIFICATION=true
+EMAIL_DELIVERY_BACKEND=smtp
+SMTP_HOST=REPLACE_EXISTING_COMPANY_SMTP_HOST
+SMTP_PORT=587
+SMTP_FROM_EMAIL=REPLACE_COMPANY_SENDER
+SMTP_USERNAME=REPLACE_COMPANY_SMTP_USERNAME
+SMTP_PASSWORD=REPLACE_PRIVATE_SMTP_PASSWORD
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+```
+
+重要配置说明：
+
+- 由机密管理工具生成并保管独立随机主密钥（至少 32 字符），首次写入后持续使用同一值；不要每次启动重新生成。
+- API/Worker 必须使用同一数据库、主密钥、原件路径、扫描和嵌入配置；密钥要另有受控恢复副本。
+- 持久本地目录可以用于单机试点，但不等于冗余对象存储；磁盘故障仍会丢数据。不要使用 `/tmp` 存业务原件。
+- ClamAV 必须实际启动在回环地址并维护病毒库。仅设置变量不代表扫描服务正常；未就绪时应阻止文件进入可发布状态。
+- SMTP 使用企业已有服务。上面是 STARTTLS 示例；如邮件服务要求隐式 TLS，按其要求设置端口和互斥的 TLS/SSL 开关。
+- 没有 SMTP 时，只能在**脱敏试用环境**临时设 `EMAIL_DELIVERY_BACKEND=disabled` 和 `REQUIRE_EMAIL_VERIFICATION=false`，
+  由管理员通过受控渠道单独发送邀请链接。此时没有验证邮件或密码重置邮件，不得视为正式企业验收通过。
+- 已有本机或 Render 数据不会自动迁入新实例；迁移必须成套处理数据库、原件、密钥和路径映射，并先在副本演练。
+
+先通过管理员的受控会话注入 `MIGRATION_DATABASE_URL` 和同一 `ENCRYPTION_MASTER_KEY`，再执行：
+
+```bash
+cd /srv/enterprise-ai
+.venv/bin/alembic upgrade head
+```
+
+Alembic 使用 `MIGRATION_DATABASE_URL`，只设置 `DATABASE_URL` 不能代替迁移配置。
+凭据不要直接写在命令行历史中；运行配置文件不会被该命令自动加载。迁移成功、DBA 授权完成后再启动 API。
+
+### 6. 配置常驻服务与 HTTPS 入口
+
+Linux/systemd 的 API 单元参考如下。由 IT 保存为 `/etc/systemd/system/enterprise-ai-api.service`；
+前提是服务账号、目录权限、运行配置和数据库迁移均已完成：
+
+```ini
+[Unit]
+Description=Enterprise AI Web and API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=enterprise-ai
+Group=enterprise-ai
+WorkingDirectory=/srv/enterprise-ai
+EnvironmentFile=/etc/enterprise-ai/runtime.env
+ExecStart=/srv/enterprise-ai/.venv/bin/uvicorn enterprise_ai_api.main:app --host 127.0.0.1 --port 8201 --no-access-log
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+先启用 API；Ollama、PostgreSQL、ClamAV 也须由各自服务管理器保持运行并设置启动顺序/故障告警。
+该单元本身不负责安装或启动这些依赖，`After` 网络就绪也不证明依赖已经健康。
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now enterprise-ai-api
+curl --fail http://127.0.0.1:8201/readyz
+```
+
+按官方说明安装 Caddy 系统服务，管理员在其 Caddyfile 中为实际内网地址配置站点，例如：
+
+```caddyfile
+https://192.168.1.50 {
+    tls internal
+    reverse_proxy 127.0.0.1:8201
+}
+```
+
+这不是公网证书。IT 必须将**此 Caddy 实例的根 CA 公共证书**通过可信渠道安装进员工设备/浏览器信任库，
+核对指纹；绝不能分发 CA 私钥。各操作系统和受管浏览器的证书管理方式不同，应由 IT 或设备管理系统分发。
+不要让员工忽略证书警告，不要使用 `curl -k` 冒充 HTTPS 验收。Caddy 的 CA 数据也需持久保存并严格保护。
+配置验证、加载和系统服务参见 [Caddy 官方服务指南](https://caddyserver.com/docs/running)及
+[内部 HTTPS 与证书信任说明](https://caddyserver.com/docs/automatic-https)。
+
+员工只连接 HTTPS 入口（通常 443）；API 仍绑定回环地址。不要把 `APP_ENV` 改成 development 来绕过 HTTPS/Cookie 问题。
+反向代理不记录 Cookie、认证头、正文或带令牌的查询串；上例不启用 Caddy 访问日志。
+
+### 7. 首次创建企业、启动 Worker、分配成员权限
+
+1. 先限制只有管理员能访问入口；管理员通过统一 HTTPS 地址创建账号和企业，完成邮件验证。
+   当前注册入口不等于企业专属的邀请制注册开关，不能仅凭“部署在内网”假设所有注册者会加入同一企业。
+2. 从工作区获取完整企业 UUID（不是企业名称，也不是页脚省略显示的 ID，可从经授权的 API 响应取得）。
+   将 `WORKER_TENANT_IDS=完整企业UUID` 加到运行配置；多个受管企业用英文逗号分隔。
+3. 创建 `/etc/systemd/system/enterprise-ai-worker.service`，使用上面的 API 单元结构，修改 Description 和 ExecStart：
+
+   ```ini
+   Description=Enterprise AI Document Worker
+   ExecStart=/srv/enterprise-ai/.venv/bin/python -m enterprise_ai_worker.main
+   ```
+
+   这是两个字段的替换片段，不是完整单元；保留同一 User、Group、WorkingDirectory、EnvironmentFile 等设置。
+   Worker 不能沿用 API 的启动命令。配置保存后执行：
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now enterprise-ai-worker
+   sudo systemctl restart enterprise-ai-api
+   sudo systemctl status enterprise-ai-api enterprise-ai-worker
+   ```
+
+   PostgreSQL Worker 未配置企业 ID 会拒绝启动；新建企业后需更新列表并重启 Worker。
+   不要在没有常驻 Worker 时让员工上传异步任务。详细行为见 [后台处理说明](docs/10-worker-sso-scim.md)。
+4. 管理员启用 MFA，妥善离线保管恢复码；创建“公司制度”“项目资料”等知识空间。
+5. 在“成员与权限”中邀请员工的指定邮箱，分配最小企业角色；再在对应空间“管理访问”中授予 viewer/manager。
+   **加入企业不等于获得所有空间的权限。** 不共享管理员账号，不要求每位员工点击“创建企业”。
+6. 先上传脱敏文件，等待后台处理，核对解析正文后发布；再邀请一名普通员工验证可读、不可读和撤权场景。
+7. 需要 SSO/SCIM 时再按 [身份接入指南](docs/10-worker-sso-scim.md)配置现有 IdP；默认不启用，不自动提供身份服务。
+
+### 8. 上线、备份与升级验收
+
+正式导入企业资料前，至少完成：
+
+- 从另一台员工电脑访问统一地址，证书受信任，登录、MFA、邀请和找回密码流程可用。
+- 普通成员只能查看授权空间已发布资料；撤回、停用和撤权后重新请求均被拒绝。
+- 真实模型能够回答合成问题并打开正确引用；不能只检查 `/healthz`。`/readyz` 仅检查数据库，不检查模型或 Worker。
+- 重启服务器后所有服务恢复；账号、原件、解析正文和问答仍在；扫描器故障不会让资料绕过扫描发布。
+- 完整恢复一次独立测试实例：数据库＋原件＋应用密钥＋运行配置，验证能够登录、解密原件和检索。
+- 建立定时备份、容量/服务/队列告警与接收负责人，完成实际并发和回答质量测试。
+
+PostgreSQL 备份工具见 [备份恢复说明](docs/06-backup-and-recovery.md)；它备份的是数据库，**不自动打包本节的本地原件目录**。
+采用本地原件时，IT 必须安排数据库与文件的一致性备份；最简单的受控方式是维护窗口停止 API/Worker 写入后备份，
+并将备份及必要密钥分开保护在独立介质。现有 PostgreSQL 备份工具在 production 模式要求私有 S3 兼容备份后端；
+可以另行部署自托管服务，也可由 DBA 制定替代备份流程，不能把改为 development 当作生产备份方案。
+个人 SQLite 备份命令不能用来备份 PostgreSQL。
+
+`enterprise_ai_api.operations` 的现有生产门禁要求 S3 原件/备份等配置；本节的持久本地原件方案不会因此自动全绿。
+它是单机试点参考，不是完整生产认证；本地存储替代方案须经企业单独审核，不能关闭检查后宣称通过。
+
+升级时：预约维护窗口 → 验证完整备份 → 停止 API/Worker → 更新经测试的提交和锁定依赖 → 重新构建网页 →
+执行数据库迁移并核对权限 → 启动服务 → 员工侧验收。不要清空数据卷、删除原件或替换原密钥。
+数据库已迁移时不保证旧程序可直接回退，应按验证过的恢复计划处理。日常无需员工重新安装软件。
+
+<a id="employee-guide"></a>
+
+## 员工如何在自己的电脑上使用
+
+### 第一次使用
+
+1. 向公司管理员获取统一访问地址、个人邀请和必要的证书配置说明。不要使用其他公司的链接或转发邀请令牌。
+2. 连接公司允许的办公网络；在家办公时先连接公司批准的 VPN。内网部署不会自动变成公网网站。
+3. 在 Windows、macOS 或 Linux 的浏览器中打开管理员给的 **HTTPS 地址**。
+   `127.0.0.1`/`localhost` 指的是你自己的电脑，不是公司服务器；Render 演示地址也不是公司内网实例。
+4. 按 IT 指引完成证书信任；出现未知证书或地址不符警告时停止输入密码，联系管理员，不要跳过警告。
+5. 打开个人邀请链接，按页面提示以受邀邮箱接受邀请、设置密码并完成邮箱验证；已有账号按页面流程登录/接受邀请。
+   若企业配置 SSO，使用管理员指定的单点登录入口，不另行创建企业。邀请过期请管理员重新发放。
+6. 按企业策略设置身份验证器 MFA，私下保存恢复码。不要与同事共享密码、验证码或恢复码。
+
+### 日常查资料和使用 AI
+
+1. 登录后确认当前企业；在“知识空间”中打开获准访问的空间，点击文档查看已发布内容。
+2. 在“AI 决策助手”中输入具体问题，必要时限定空间；查看回答中的文件名、版本和位置。
+3. 点击引用的“查看原文”，核对高亮段落及上下文。AI 结果仍需人工判断，不能直接代替审批或重要业务决策。
+4. 有上传权限时通过网页导入允许格式的资料；文件先到服务器处理，只有管理员确认并发布后才用于问答。
+5. 看不到空间或资料时向管理员申请访问，不要让同事借账号或转发受限内容来绕过权限。
+6. 使用结束后在共享设备上安全退出；个人账号的“账号安全”可查看、撤销登录会话。
+
+员工只需浏览器；模型和文件处理都发生在服务器上，无需在每台电脑配置 AI Key 或安装开发依赖。
+关闭自己的浏览器不会停止服务器；但服务器断电、休眠、磁盘故障或网络中断会影响所有员工。
+不同员工看到的内容取决于权限，私人问答历史也不会自动变成全员共享。
+
+### 常见问题
+
+| 现象 | 员工先检查什么 | 管理员进一步检查什么 |
+| --- | --- | --- |
+| 链接打不开 | 地址是否为公司地址，是否在办公网/VPN | 服务器、DNS/IP、防火墙、Caddy 和 API 是否在线 |
+| 证书警告 | 停止输入凭据，核对地址并联系 IT | 内部 CA 信任、证书有效期及主机名/IP 匹配 |
+| 收不到邀请/重置邮件 | 邮箱和垃圾邮件目录 | SMTP 真实投递；是否仍为 disabled 模式；链接地址是否正确 |
+| 登录后没有资料 | 当前企业、空间授权是否正确 | 企业成员关系、空间角色、文档是否发布；不要关闭权限检查 |
+| 文件一直排队 | 等待并向管理员提供任务信息 | Worker 进程、企业 ID 列表、模型/扫描器与失败原因 |
+| AI 回答慢或提示不可用 | 避免重复提交，稍后再试 | 模型是否就绪、资源使用、并发负载；不能只看网页是否能打开 |
+| AI 说依据不足 | 问题是否明确、空间选择是否正确 | 解析完整性、发布状态、索引与检索质量；不一定是员工操作错误 |
+| 旧引用无法打开 | 重新提问，必要时联系资料负责人 | 资料是否撤回/替代、空间权限是否变化，不绕过访问限制 |
+
+报障提供时间、页面提示和请求 ID；不要发送密码、验证码、密钥或未经授权的原文截图。
 
 ## 项目文档
 
