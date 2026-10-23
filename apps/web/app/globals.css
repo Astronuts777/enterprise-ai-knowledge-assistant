@@ -701,3 +701,16 @@ button { cursor: pointer; }
 .employee-item span, .employee-item small { color: #65756d; }
 .document-grant-panel { border-top: 1px solid #dce4df; margin-top: 24px; padding-top: 20px; }
 @media (max-width: 800px) { .employee-grid { grid-template-columns: 1fr; } }
+
+.approval-filters { margin: 24px 0; flex-wrap: wrap; }
+.approval-filters select { padding: 10px; border: 1px solid #dce4df; border-radius: 8px; background: white; }
+.approval-list { margin: 20px 0; }
+.approval-card { display: flex; justify-content: space-between; align-items: center; gap: 20px; background: white; padding: 24px; margin: 12px 0; border: 1px solid #dce4df; border-radius: 16px; }
+.approval-card h2 { font-size: 20px; }
+.approval-card small, .approval-record small { color: #617268; }
+.approval-panel .dialog-form textarea { width: 100%; min-height: 90px; border: 1px solid #cad6cd; border-radius: 10px; padding: 12px; font: inherit; resize: vertical; }
+.approval-record { border-top: 1px solid #dce4df; padding: 20px 0; }
+.approval-note { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.approval-panel .heading-actions { flex-wrap: wrap; }
+.approval-panel { display: block; overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 700px) { .approval-card { align-items: start; flex-direction: column; } }

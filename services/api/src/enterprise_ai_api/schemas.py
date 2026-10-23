@@ -204,6 +204,7 @@ class SpaceMembershipResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
+    approval_required: bool = False
     access_mode: Literal["space", "restricted"] = "space"
     model_config = ConfigDict(from_attributes=True)
 

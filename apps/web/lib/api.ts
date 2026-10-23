@@ -56,6 +56,7 @@ export type AuditEvent = {
 export type DocumentStatus = "queued" | "processing" | "ready" | "published" | "superseded" | "failed";
 
 export type KnowledgeDocument = {
+  approval_required: boolean;
   access_mode: "space" | "restricted";
   id: string;
   tenant_id: string;
@@ -685,4 +686,35 @@ export function setDocumentGrant(actor: string, tenant: string, document: string
     method: role === "none" ? "DELETE" : "PUT",
     ...(role !== "none" ? { body: JSON.stringify({ role }) } : {}),
   });
+}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled" | "published";
+export type DocumentApproval = {
+  id: string; document_id: string; version_id: string; document_title: string;
+  version_number: number; attempt: number; status: ApprovalStatus; submitted_by: string;
+  submission_note: string; reviewed_by: string | null; review_note: string | null;
+  created_at: string; decided_at: string | null; can_decide: boolean; can_cancel: boolean;
+};
+export function listApprovals(actor: string, tenant: string, options: { status?: ApprovalStatus; version_id?: string; offset?: number } = {}) {
+  const query = new URLSearchParams({ limit: "50" });
+  if (options.status) query.set("status", options.status);
+  if (options.version_id) query.set("version_id", options.version_id);
+  query.set("offset", String(options.offset ?? 0));
+  return request<DocumentApproval[]>(`/v1/tenants/${tenant}/approvals?${query}`, actor);
+}
+export function enableDocumentApproval(actor: string, tenant: string, version: string) {
+  return request(`/v1/tenants/${tenant}/document-versions/${version}/enable-approval`, actor, { method: "POST" });
+}
+export function submitDocumentApproval(actor: string, tenant: string, version: string, note: string) {
+  return request<DocumentApproval>(`/v1/tenants/${tenant}/document-versions/${version}/approvals`, actor, {
+    method: "POST", body: JSON.stringify({ note }),
+  });
+}
+export function decideDocumentApproval(actor: string, tenant: string, approval: string, decision: "approved" | "rejected", note: string) {
+  return request<DocumentApproval>(`/v1/tenants/${tenant}/approvals/${approval}/decision`, actor, {
+    method: "POST", body: JSON.stringify({ decision, note }),
+  });
+}
+export function cancelDocumentApproval(actor: string, tenant: string, approval: string) {
+  return request<DocumentApproval>(`/v1/tenants/${tenant}/approvals/${approval}/cancel`, actor, { method: "POST" });
 }

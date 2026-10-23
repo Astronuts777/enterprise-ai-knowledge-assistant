@@ -70,9 +70,10 @@ import {
   verifyEmail,
 } from "../lib/api";
 
+import { ApprovalInbox, ApprovalPanel } from "./document-approvals";
 import EmployeeCenter from "./employee-center";
 
-type View = "overview" | "assistant" | "spaces" | "documents" | "members" | "audit" | "settings";
+type View = "approvals" | "overview" | "assistant" | "spaces" | "documents" | "members" | "audit" | "settings";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -204,6 +205,8 @@ export default function Dashboard() {
   const [uploadDialog, setUploadDialog] = useState(false);
   const [versionTarget, setVersionTarget] = useState<DocumentSummary | null>(null);
   const [documentReader, setDocumentReader] = useState<DocumentContent | null>(null);
+  const [approvalTarget, setApprovalTarget] = useState<{ documentId: string; versionId: string } | null>(null);
+  const [approvalRevision, setApprovalRevision] = useState(0);
   const [versionPanel, setVersionPanel] = useState<DocumentDetail | null>(null);
   const [mfaDialog, setMfaDialog] = useState<"enable" | "confirm" | "recovery" | "regenerate" | "disable" | null>(null);
   const [mfaSetup, setMfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
@@ -397,6 +400,7 @@ export default function Dashboard() {
     setMfaSetup(null);
     setRecoveryCodes([]);
     setDocumentReader(null);
+    setApprovalTarget(null);
   }
 
   async function handleCreateTenant(event: FormEvent<HTMLFormElement>) {
@@ -916,6 +920,7 @@ export default function Dashboard() {
     setActiveSpace(null);
     setMembers([]);
     setDocumentReader(null);
+    setApprovalTarget(null);
     setView("overview");
   }
 
@@ -976,6 +981,7 @@ export default function Dashboard() {
     { key: "assistant", label: "AI 决策助手", icon: "assistant" },
     { key: "spaces", label: "知识空间", icon: "spaces" },
     { key: "members", label: "成员与权限", icon: "members" },
+    { key: "approvals", label: "文件审批", icon: "spaces" },
   ];
 
   return (
@@ -1037,7 +1043,7 @@ export default function Dashboard() {
               onBack={() => setView("spaces")}
               onUpload={() => { setVersionTarget(null); setUploadDialog(true); }}
               onNewVersion={(document) => { setVersionTarget(document); setUploadDialog(true); }}
-              onPublish={handlePublish}
+              onPublish={(item) => item.document.approval_required ? handleVersions(item) : handlePublish(item)}
               onVersions={handleVersions}
               onReindex={handleReindex}
               onJob={handleDocumentJob}
@@ -1046,6 +1052,7 @@ export default function Dashboard() {
               onManageAccess={() => setSpaceAccessDialog(true)}
             />
           )}
+          {!mfaBlocked && view === "approvals" && <ApprovalInbox actor={actorId} tenant={tenant.id} revision={approvalRevision} onOpen={(documentId, versionId) => setApprovalTarget({ documentId, versionId })} />}
           {!mfaBlocked && view === "members" && (
             <><EmployeeCenter actor={actorId} tenant={tenant} documents={Object.values(documentsBySpace).flat()} onChanged={() => loadWorkspace(actorId, tenantId!)} />{canManageMembers && <details><summary>成员邀请、停用与会话管理</summary><MembersView ownerId={tenant.owner_user_id} members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} onStatusChange={handleMemberStatus} /></details>}</>
           )}
@@ -1071,6 +1078,7 @@ export default function Dashboard() {
         </div>
       </section>
 
+      {!mfaBlocked && approvalTarget && <ApprovalPanel key={`${actorId}:${tenant.id}:${approvalTarget.versionId}`} actor={actorId} tenant={tenant.id} {...approvalTarget} onClose={() => setApprovalTarget(null)} onChanged={async () => { await loadWorkspace(actorId, tenant.id); setApprovalRevision((n) => n + 1); }} onPreview={async (document, version) => { const content = await getDocumentContent(actorId, tenant.id, document, version); setDocumentReader(content); setApprovalTarget(null); }} />}
       {spaceDialog && <Dialog title="创建知识空间" description="空间决定资料的权限边界和敏感等级。" onClose={() => setSpaceDialog(false)}>
         <form className="dialog-form" onSubmit={handleCreateSpace}>
           <label>空间名称<input name="name" minLength={2} maxLength={160} placeholder="例如：公司政策" autoFocus required /></label>
@@ -1148,7 +1156,7 @@ export default function Dashboard() {
         </form>
       </Dialog>}
       {versionPanel && (
-        <DocumentVersions detail={versionPanel} busy={busy} onClose={() => setVersionPanel(null)} onPreview={handlePreviewVersion} onChange={handleVersionPublication} />
+        <DocumentVersions onApproval={(version) => { setApprovalTarget({ documentId: versionPanel.document.id, versionId: version.id }); setVersionPanel(null); }} detail={versionPanel} busy={busy} onClose={() => setVersionPanel(null)} onPreview={handlePreviewVersion} onChange={handleVersionPublication} />
       )}
       {documentReader && (
         <DocumentReader content={documentReader} onClose={() => setDocumentReader(null)} />
@@ -1460,11 +1468,11 @@ function DocumentsView({ space, documents, busy, canManage, onBack, onUpload, on
     {documents.some((item) => item.can_edit && ["queued", "processing", "failed"].includes(item.latest_version.status)) && <section className="knowledge-status"><h2>文件处理任务</h2><p>状态每 5 秒自动刷新；持续排队时，请确认本地 Worker 已启动。失败的旧同步版本请上传新版本。</p>{documents.filter((item) => item.can_edit && ["queued", "processing", "failed"].includes(item.latest_version.status)).map((item) => <div className="index-row" key={item.document.id}><span>{item.document.title} · {statusLabels[item.latest_version.status]} {item.latest_version.error_message}</span><button disabled={busy || item.latest_version.error_message === "unsafe_file"} onClick={() => onJob(item, item.latest_version.status === "failed" ? "retry" : "cancel")}>{item.latest_version.status === "failed" ? "重试后台任务" : "取消任务"}</button></div>)}</section>}
     {canManage && documents.length > 0 && <details className="knowledge-status"><summary>语义检索索引管理</summary><p>配置模型后，可为旧资料建立或更新索引。若使用外部模型，此操作会将文档解析正文发送给已配置的模型服务。索引不改变发布状态。</p>{documents.filter((item) => item.can_publish && ["ready", "published"].includes(item.latest_version.status)).map((item) => <div className="index-row" key={item.document.id}><span>{item.document.title} · v{item.latest_version.version_number}</span><button className="secondary-button" disabled={busy} onClick={() => onReindex(item)}>建立语义索引</button></div>)}</details>}
     <div className="page-heading document-heading"><div><p className="kicker">{classificationLabels[space.classification]}空间</p><h1>{space.name}</h1><p>只显示你获授权的文档；机密文档还需所有者逐人授权。</p></div><div className="heading-actions">{canManage && <button className="secondary-button" onClick={onManageAccess}><Icon name="shield" />管理访问</button>}{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />导入资料</button>}</div></div>
-    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有已发布资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><button className="document-open" disabled={busy} onClick={() => onOpen(item)}><i><Icon name="file" /></i><p><b>{item.document.title}{item.document.access_mode === "restricted" ? " · 指定成员" : ""}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.can_edit && <span>{item.published_version ? `当前生效：v${item.published_version.version_number}` : "当前无已发布版本"}</span>}{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></button><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions"><button className="view-action" disabled={busy} onClick={() => onOpen(item)}>查看</button>{item.can_publish && item.latest_version.status === "ready" && <button className="publish-action" disabled={busy} onClick={() => onPublish(item)}>发布</button>}{item.can_edit && <><button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button><button disabled={busy} onClick={() => onVersions(item)}>版本管理</button></>}{!item.can_edit && <span>只读</span>}</div></article>)}</section>}
+    {documents.length === 0 ? <section className="empty-state document-empty"><span><Icon name="file" /></span><h2>{canManage ? "导入第一份企业资料" : "这个空间还没有已发布资料"}</h2><p>{canManage ? "支持 PDF、DOCX、TXT 和 Markdown。系统会保存加密原件并生成带定位的文本块。" : "你拥有查看权限；空间管理者发布资料后会显示在这里。"}</p>{canManage && <button className="primary-button" onClick={onUpload}><Icon name="upload" />选择文件</button>}</section> : <section className="documents-card"><div className="document-table-head"><span>文档</span><span>版本</span><span>大小</span><span>状态</span><span>操作</span></div>{documents.map((item) => <article className="document-row" key={item.document.id}><button className="document-open" disabled={busy} onClick={() => onOpen(item)}><i><Icon name="file" /></i><p><b>{item.document.title}{item.document.access_mode === "restricted" ? " · 指定成员" : ""}</b><span>{item.latest_version.filename} · {formatDate(item.latest_version.created_at)}</span>{item.can_edit && <span>{item.published_version ? `当前生效：v${item.published_version.version_number}` : "当前无已发布版本"}</span>}{item.latest_version.error_message && <em>{item.latest_version.error_message}</em>}</p></button><span>v{item.latest_version.version_number}</span><span>{formatBytes(item.latest_version.byte_size)}</span><span className={`document-status ${item.latest_version.status}`}>{statusLabels[item.latest_version.status]}</span><div className="document-actions"><button className="view-action" disabled={busy} onClick={() => onOpen(item)}>查看</button>{item.can_publish && item.latest_version.status === "ready" && <button className="publish-action" disabled={busy} onClick={() => onPublish(item)}>{item.document.approval_required ? "审批/发布" : "发布"}</button>}{item.can_edit && <><button disabled={busy} onClick={() => onNewVersion(item)}>新版本</button><button disabled={busy} onClick={() => onVersions(item)}>版本管理</button></>}{!item.can_edit && <span>只读</span>}</div></article>)}</section>}
   </>;
 }
 
-function DocumentVersions({ detail, busy, onClose, onPreview, onChange }: { detail: DocumentDetail; busy: boolean; onClose: () => void; onPreview: (version: DocumentVersion) => void; onChange: (version: DocumentVersion) => void }) {
+function DocumentVersions({ onApproval, detail, busy, onClose, onPreview, onChange }: { onApproval: (version: DocumentVersion) => void; detail: DocumentDetail; busy: boolean; onClose: () => void; onPreview: (version: DocumentVersion) => void; onChange: (version: DocumentVersion) => void }) {
   const [pending, setPending] = useState<DocumentVersion | null>(null);
   const labels = { queued: "后台排队中", processing: "后台处理中", ready: "待发布", published: "已发布", superseded: "已替代", failed: "处理失败" };
   return <div className="dialog-backdrop"><section role="dialog" aria-modal="true" aria-labelledby="version-heading" className="dialog document-reader">
@@ -1479,7 +1487,8 @@ function DocumentVersions({ detail, busy, onClose, onPreview, onChange }: { deta
     <div className="version-list">{detail.versions.map((version) => <article key={version.id} className="version-entry">
       <div><b>v{version.version_number} · {version.filename}</b><small>{formatDate(version.created_at)} · {formatBytes(version.byte_size)}</small><span className={`document-status ${version.status}`}>{labels[version.status]}</span></div>
       <div className="document-actions"><button disabled={busy} onClick={() => onPreview(version)}>预览此版本</button>
-        {detail.can_publish && ["ready", "published", "superseded"].includes(version.status) && <button disabled={busy || pending !== null} onClick={() => setPending(version)}>{version.status === "published" ? "撤回发布" : "发布此版本"}</button>}
+        {detail.can_edit && <button disabled={busy} onClick={() => onApproval(version)}>审批与发布</button>}
+        {detail.can_publish && (version.status === "published" || !detail.document.approval_required) && ["ready", "published", "superseded"].includes(version.status) && <button disabled={busy || pending !== null} onClick={() => setPending(version)}>{version.status === "published" ? "撤回发布" : "发布此版本"}</button>}
       </div>
     </article>)}</div>
     <footer>管理员仍可预览未发布版本；已发送到浏览器或下载的内容无法远程收回。</footer>

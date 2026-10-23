@@ -71,7 +71,7 @@ export default function EmployeeCenter({ actor, tenant, documents, onChanged }: 
   const currentGrant = access?.grants.find((g) => g.user_id === selected?.user_id)?.role;
   return <section className="employee-center">
     <div className="page-heading"><div><p className="kicker">企业协作 · 第一阶段</p><h1>员工中心</h1>
-      <p>同企业成员目录、员工资料和文档级授权。聊天与审批尚未开放。</p></div></div>
+      <p>同企业成员目录、员工资料和文档级授权。文件审批请前往“文件审批”页面；聊天尚未开放。</p></div></div>
     <div className="knowledge-status">
       <h2>{owner ? "你是本企业所有者" : "企业所有者与管理员是不同权限"}</h2>
       <p>{tenant.owner_user_id

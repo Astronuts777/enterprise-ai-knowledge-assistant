@@ -315,6 +315,8 @@ def create_app(
     application.include_router(scim_group_router, tags=["enterprise-identity"])
     from enterprise_ai_api.employee_routes import router as employee_router
     application.include_router(employee_router, tags=["employees"])
+    from enterprise_ai_api.approval_routes import router as approval_router
+    application.include_router(approval_router, tags=["document-approvals"])
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
     application.include_router(ingestion_router, tags=["document-processing"])

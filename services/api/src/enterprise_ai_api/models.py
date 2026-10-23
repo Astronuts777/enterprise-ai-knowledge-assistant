@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     true,
 )
@@ -236,6 +237,7 @@ class Document(Base):
         CheckConstraint("access_mode IN ('space', 'restricted')", name="ck_document_access_mode"),
     )
     access_mode: Mapped[str] = mapped_column(String(16), default="space", server_default="space")
+    approval_required: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     tenant_id: Mapped[UUID] = mapped_column(
@@ -245,6 +247,31 @@ class Document(Base):
     title: Mapped[str] = mapped_column(String(255))
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentApproval(Base):
+    __tablename__ = "document_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'cancelled', 'published')",
+            name="ck_document_approval_status",
+        ),
+        UniqueConstraint("version_id", "attempt", name="uq_document_approval_attempt"),
+        Index("ix_document_approvals_inbox", "tenant_id", "status", "created_at", "id"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("documents.id"), index=True)
+    version_id: Mapped[UUID] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    submitted_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    submission_note: Mapped[str] = mapped_column(EncryptedText())
+    reviewed_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    review_note: Mapped[str | None] = mapped_column(EncryptedText())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DocumentGrant(Base):

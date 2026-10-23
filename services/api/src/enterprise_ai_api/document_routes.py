@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from enterprise_ai_api.ai_providers import AIProviderError, EmbeddingProvider
+from enterprise_ai_api.approvals import consume_publication_approval
 from enterprise_ai_api.audit import record_audit_event
 from enterprise_ai_api.crypto import content_fingerprint, encrypt_bytes
 from enterprise_ai_api.database import get_session, set_tenant_context
@@ -722,6 +723,7 @@ def publish_document_version(
             detail="Only successfully processed document versions can be published",
         )
 
+    consume_publication_approval(session, session.get(Document, version.document_id), version)
     published_versions = session.scalars(
         select(DocumentVersion).where(
             DocumentVersion.document_id == version.document_id,
