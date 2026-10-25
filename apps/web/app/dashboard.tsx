@@ -72,8 +72,9 @@ import {
 
 import { ApprovalInbox, ApprovalPanel } from "./document-approvals";
 import EmployeeCenter from "./employee-center";
+import EnterpriseChat from "./enterprise-chat";
 
-type View = "approvals" | "overview" | "assistant" | "spaces" | "documents" | "members" | "audit" | "settings";
+type View = "chat" | "approvals" | "overview" | "assistant" | "spaces" | "documents" | "members" | "audit" | "settings";
 
 const ACTOR_KEY = "enterprise-ai.dev-actor-id";
 const TENANT_KEY = "enterprise-ai.active-tenant-id";
@@ -93,6 +94,7 @@ const classificationLabels: Record<Classification, string> = {
 };
 
 const auditActionLabels: Record<string, string> = {
+  "chat.message_sent": "发送企业聊天消息（正文不记入审计）",
   "account.registered": "账号注册",
   "account.login": "账号登录",
   "account.logout": "安全退出",
@@ -197,6 +199,7 @@ export default function Dashboard() {
   const [canManageActiveSpace, setCanManageActiveSpace] = useState(false);
   const [canManageMembers, setCanManageMembers] = useState(true);
   const [view, setView] = useState<View>("overview");
+  const [chatPeer, setChatPeer] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [spaceDialog, setSpaceDialog] = useState(false);
@@ -383,6 +386,7 @@ export default function Dashboard() {
 
   async function handleLogout() {
     if (ACCOUNT_MODE) await logoutAccount();
+    setChatPeer(null);
     window.localStorage.removeItem(TENANT_KEY);
     setActorId("");
     setAccountEmail("");
@@ -909,6 +913,7 @@ export default function Dashboard() {
   }
 
   function resetDemo() {
+    setChatPeer(null);
     window.localStorage.removeItem(TENANT_KEY);
     setTenantId(null);
     setTenant(null);
@@ -982,6 +987,7 @@ export default function Dashboard() {
     { key: "spaces", label: "知识空间", icon: "spaces" },
     { key: "members", label: "成员与权限", icon: "members" },
     { key: "approvals", label: "文件审批", icon: "spaces" },
+    { key: "chat", label: "企业聊天", icon: "members" },
   ];
 
   return (
@@ -991,7 +997,7 @@ export default function Dashboard() {
         <nav aria-label="主导航">
           <p>工作区</p>
           {navItems.map((item) => (
-            <button className={view === item.key || (item.key === "spaces" && view === "documents") ? "active" : ""} key={item.key} onClick={() => setView(item.key)}>
+            <button className={view === item.key || (item.key === "spaces" && view === "documents") ? "active" : ""} key={item.key} onClick={() => { setChatPeer(null); setView(item.key); }}>
               <Icon name={item.icon} />{item.label}
               {item.key === "spaces" && spaces.length > 0 && <em>{spaces.length}</em>}
             </button>
@@ -1053,8 +1059,9 @@ export default function Dashboard() {
             />
           )}
           {!mfaBlocked && view === "approvals" && <ApprovalInbox actor={actorId} tenant={tenant.id} revision={approvalRevision} onOpen={(documentId, versionId) => setApprovalTarget({ documentId, versionId })} />}
+          {!mfaBlocked && view === "chat" && <EnterpriseChat key={`${actorId}:${tenant.id}:${chatPeer ?? "directory"}`} actor={actorId} tenant={tenant.id} initialPeer={chatPeer} />}
           {!mfaBlocked && view === "members" && (
-            <><EmployeeCenter actor={actorId} tenant={tenant} documents={Object.values(documentsBySpace).flat()} onChanged={() => loadWorkspace(actorId, tenantId!)} />{canManageMembers && <details><summary>成员邀请、停用与会话管理</summary><MembersView ownerId={tenant.owner_user_id} members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} onStatusChange={handleMemberStatus} /></details>}</>
+            <><EmployeeCenter actor={actorId} tenant={tenant} documents={Object.values(documentsBySpace).flat()} onChanged={() => loadWorkspace(actorId, tenantId!)} onChat={(peer) => { setChatPeer(peer); setView("chat"); }} />{canManageMembers && <details><summary>成员邀请、停用与会话管理</summary><MembersView ownerId={tenant.owner_user_id} members={members} actorId={actorId} busy={busy} canManage={canManageMembers} onAdd={() => setMemberDialog(true)} onRevokeSessions={handleRevokeMemberSessions} onStatusChange={handleMemberStatus} /></details>}</>
           )}
           {!mfaBlocked && view === "audit" && actorMembership?.role === "enterprise_admin" && (
             <AuditView events={auditEvents} busy={busy} onExport={handleExportAudit} />

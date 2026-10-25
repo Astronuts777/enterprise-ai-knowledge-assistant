@@ -8,8 +8,9 @@ import {
 
 const roles = { enterprise_admin: "企业管理员", knowledge_admin: "知识管理员", member: "普通成员" };
 
-export default function EmployeeCenter({ actor, tenant, documents, onChanged }: {
+export default function EmployeeCenter({ actor, tenant, documents, onChanged, onChat }: {
   actor: string; tenant: Tenant; documents: DocumentSummary[]; onChanged: () => Promise<void>;
+  onChat: (peer: string) => void;
 }) {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [more, setMore] = useState(false);
@@ -71,7 +72,7 @@ export default function EmployeeCenter({ actor, tenant, documents, onChanged }: 
   const currentGrant = access?.grants.find((g) => g.user_id === selected?.user_id)?.role;
   return <section className="employee-center">
     <div className="page-heading"><div><p className="kicker">企业协作 · 第一阶段</p><h1>员工中心</h1>
-      <p>同企业成员目录、员工资料和文档级授权。文件审批请前往“文件审批”页面；聊天尚未开放。</p></div></div>
+      <p>同企业成员目录、员工资料和文档级授权。选中有效成员可发起私聊；审批请前往“文件审批”。</p></div></div>
     <div className="knowledge-status">
       <h2>{owner ? "你是本企业所有者" : "企业所有者与管理员是不同权限"}</h2>
       <p>{tenant.owner_user_id
@@ -97,6 +98,7 @@ export default function EmployeeCenter({ actor, tenant, documents, onChanged }: 
       <section className="employee-detail">
         {!selected ? <p>选择左侧员工，查看资料或配置文档权限。</p> : <>
           <h2>{selected.display_name || "员工资料"}</h2>
+          {selected.active && selected.user_id !== actor && <button className="secondary-button" onClick={() => onChat(selected.user_id)}>与此员工私聊</button>}
           <p className="upload-hint">身份标识：{selected.user_id}</p>
           <form key={selected.user_id} className="dialog-form" onSubmit={profile}>
             <label>姓名<input name="name" maxLength={100} defaultValue={selected.display_name}

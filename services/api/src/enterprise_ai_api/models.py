@@ -185,6 +185,51 @@ class Membership(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ChatConversation(Base):
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_key", name="uq_chat_conversation_key"),
+        UniqueConstraint("tenant_id", "id", name="uq_chat_conversation_tenant"),
+        CheckConstraint(
+            "(kind = 'lobby' AND participant_a IS NULL AND participant_b IS NULL) OR "
+            "(kind = 'direct' AND participant_a IS NOT NULL AND participant_b IS NOT NULL "
+            "AND participant_a <> participant_b)",
+            name="ck_chat_conversation_kind",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    conversation_key: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(16))
+    participant_a: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    participant_b: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    last_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["chat_conversations.tenant_id", "chat_conversations.id"],
+            name="fk_chat_message_conversation",
+        ),
+        UniqueConstraint("conversation_id", "sequence", name="uq_chat_message_sequence"),
+        UniqueConstraint("conversation_id", "sender_id", "client_id", name="uq_chat_message_retry"),
+        CheckConstraint("sequence > 0", name="ck_chat_message_sequence"),
+        Index("ix_chat_messages_rate", "tenant_id", "sender_id", "created_at"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID] = mapped_column()
+    sequence: Mapped[int] = mapped_column(Integer)
+    sender_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    client_id: Mapped[UUID] = mapped_column()
+    body: Mapped[str] = mapped_column(EncryptedText())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Space(Base):
     __tablename__ = "spaces"
     __table_args__ = (

@@ -197,6 +197,11 @@ def create_app(
 
     @application.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, error: RequestValidationError):
+        if "/chat/" in request.url.path:
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "消息格式不正确：正文须为 1–4000 字，且不能包含空字符。"},
+            )
         if request.url.path.startswith("/scim/v2/"):
             return _scim_error(400, "Invalid SCIM request", "invalidValue")
         return await request_validation_exception_handler(request, error)
@@ -225,6 +230,8 @@ def create_app(
             )
             raise
         response.headers["X-Request-ID"] = request_id
+        if "/chat/" in request.url.path:
+            response.headers["Cache-Control"] = "no-store"
         if request.url.path.startswith("/scim/v2/"):
             response.headers["Cache-Control"] = "no-store"
             if response.status_code != 204:
@@ -317,6 +324,8 @@ def create_app(
     application.include_router(employee_router, tags=["employees"])
     from enterprise_ai_api.approval_routes import router as approval_router
     application.include_router(approval_router, tags=["document-approvals"])
+    from enterprise_ai_api.chat_routes import router as chat_router
+    application.include_router(chat_router, tags=["enterprise-chat"])
     application.include_router(router, tags=["tenancy"])
     application.include_router(document_router, tags=["documents"])
     application.include_router(ingestion_router, tags=["document-processing"])

@@ -718,3 +718,31 @@ export function decideDocumentApproval(actor: string, tenant: string, approval: 
 export function cancelDocumentApproval(actor: string, tenant: string, approval: string) {
   return request<DocumentApproval>(`/v1/tenants/${tenant}/approvals/${approval}/cancel`, actor, { method: "POST" });
 }
+
+export type ChatConversation = {
+  id: string; kind: "lobby" | "direct"; peer_user_id: string | null;
+  can_send: boolean; created_at: string;
+};
+export type ChatMessage = {
+  id: string; sequence: number; sender_id: string; client_id: string; body: string; created_at: string;
+};
+export type ChatMessagePage = { conversation: ChatConversation; messages: ChatMessage[]; has_more: boolean };
+export function listChatConversations(actor: string, tenant: string, offset = 0) {
+  return request<ChatConversation[]>(`/v1/tenants/${tenant}/chat/conversations?offset=${offset}&limit=50`, actor);
+}
+export function openChatConversation(actor: string, tenant: string, peer: string | null) {
+  return request<ChatConversation>(`/v1/tenants/${tenant}/chat/conversations`, actor, {
+    method: "POST", body: JSON.stringify({ peer_user_id: peer }),
+  });
+}
+export function listChatMessages(actor: string, tenant: string, conversation: string, cursor: { before?: number; after?: number } = {}) {
+  const query = new URLSearchParams({ limit: "50" });
+  if (cursor.before !== undefined) query.set("before", String(cursor.before));
+  if (cursor.after !== undefined) query.set("after", String(cursor.after));
+  return request<ChatMessagePage>(`/v1/tenants/${tenant}/chat/conversations/${conversation}/messages?${query}`, actor);
+}
+export function sendChatMessage(actor: string, tenant: string, conversation: string, client_id: string, body: string) {
+  return request<ChatMessage>(`/v1/tenants/${tenant}/chat/conversations/${conversation}/messages`, actor, {
+    method: "POST", body: JSON.stringify({ client_id, body }),
+  });
+}
